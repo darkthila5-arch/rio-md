@@ -3,7 +3,7 @@ import express from 'express';
 import makeWASocket, {
   useMultiFileAuthState, DisconnectReason, Browsers, fetchLatestBaileysVersion,
   proto, generateWAMessageFromContent, prepareWAMessageMedia, isJidGroup,
-  BufferJSON, initAuthCreds, makeCacheableSignalKeyStore
+  BufferJSON, initAuthCreds, makeCacheableSignalKeyStore, downloadMediaMessage
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -377,6 +377,77 @@ const OWNER_NUMBER = (process.env.OWNER_NUMBER || '').replace(/\D/g, '');
 const USE_BUTTONS = (process.env.BUTTONS || 'on').toLowerCase() !== 'off';
 const TIMEZONE = process.env.TIMEZONE || 'Asia/Colombo';
 
+const DEFAULT_MODE = (process.env.MODE || 'public').toLowerCase() === 'private' ? 'private' : 'public';
+const CARD_URL = (process.env.CARD_URL || '').trim();
+const jidNum = (j) => String(j || '').split('@')[0].split(':')[0];
+
+/* ---------- per-session settings (public/private mode) ---------- */
+const SETTINGS_FILE = path.join(SESSION_ROOT, '_settings.json');
+let settings = {};
+try { settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) || {}; } catch { settings = {}; }
+const getMode = (sid) => settings[sid]?.mode || DEFAULT_MODE;
+function setMode(sid, mode) {
+  settings[sid] = { ...(settings[sid] || {}), mode };
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings)); } catch (err) { console.error('Could not save settings:', err?.message || err); }
+}
+
+/* ---------- bot DP card (the "web og image" style preview on every reply) ---------- */
+const dpCache = new WeakMap(); // sock -> { buf, at }
+async function getBotDp(sock) {
+  const c = dpCache.get(sock);
+  if (c && Date.now() - c.at < 30 * 60 * 1000) return c.buf;
+  let buf = null;
+  try {
+    const url = await sock.profilePictureUrl(sock.user.id, 'image');
+    const res = await fetch(url, { signal: AbortSignal.timeout(15000) });
+    if (res.ok) buf = Buffer.from(await res.arrayBuffer());
+  } catch { /* no profile picture or privacy hides it */ }
+  if (!buf) {
+    try {
+      const res = await fetch(MENU_IMAGE, { signal: AbortSignal.timeout(15000) });
+      if (res.ok) buf = Buffer.from(await res.arrayBuffer());
+    } catch { /* ignore */ }
+  }
+  dpCache.set(sock, { buf, at: Date.now() });
+  return buf;
+}
+function resetBotDp(sock) { dpCache.delete(sock); }
+
+async function cardContext(sock) {
+  const thumbnail = await getBotDp(sock);
+  const me = jidNum(sock.user?.id);
+  return {
+    externalAdReply: {
+      title: BOT_NAME,
+      body: 'Powered by Rio Editz',
+      mediaType: 1,
+      renderLargerThumbnail: true,
+      showAdAttribution: false,
+      sourceUrl: CARD_URL || (OWNER_NUMBER ? `https://wa.me/${OWNER_NUMBER}` : `https://wa.me/${me}`),
+      ...(thumbnail ? { thumbnail } : {})
+    }
+  };
+}
+
+// Every text reply goes through here so it shows the bot's DP as a preview card.
+async function say(sock, jid, text, quoted, extra = {}) {
+  let contextInfo;
+  try { contextInfo = await cardContext(sock); } catch { /* send without the card */ }
+  return sock.sendMessage(jid, { text, ...extra, ...(contextInfo ? { contextInfo } : {}) }, { quoted });
+}
+
+/* ---------- emoji reactions ---------- */
+const REACTIONS = {
+  menu: '📜', help: '📜', list: '📜', alive: '💚', bot: '🤖', ping: '🏓', runtime: '⏱️', about: 'ℹ️', owner: '👑',
+  tt: '🎵', tiktok: '🎵', fb: '📘', facebook: '📘', pin: '📌', pinterest: '📌', song: '🎶', play: '🎶', yt: '🎶', ytmp3: '🎶',
+  dl: '📥', ytdl: '📥', dlcheck: '🔍', media: '🎨', sticker: '🎨', groupinfo: '👥', grouphelp: '👥', status: '📊',
+  mode: '⚙️', broadcast: '📢', bc: '📢', block: '⛔', unblock: '✅', join: '🔗', leave: '🚪', setbio: '✍️', setpp: '🖼️', restart: '🔄'
+};
+async function react(sock, jid, key, emoji) {
+  try { await sock.sendMessage(jid, { react: { text: emoji, key } }); }
+  catch (err) { console.error('React error:', err?.message || err); }
+}
+
 function unwrapMessage(message) {
   let m = message || {};
   for (let i = 0; i < 6; i++) {
@@ -473,6 +544,7 @@ function menuCaption(name) {
     '╭─❮ 📥 *DOWNLOAD* ❯',
     `│ ✦ ${p}tt <link>`,
     `│ ✦ ${p}fb <link>`,
+    `│ ✦ ${p}pin <link>`,
     `│ ✦ ${p}song <name/link>`,
     '╰──────────────⬣',
     '',
@@ -488,6 +560,14 @@ function menuCaption(name) {
     '',
     '╭─❮ 👑 *OWNER* ❯',
     `│ ✦ ${p}status`,
+    `│ ✦ ${p}mode <public/private>`,
+    `│ ✦ ${p}broadcast <text>`,
+    `│ ✦ ${p}block / ${p}unblock`,
+    `│ ✦ ${p}join <group link>`,
+    `│ ✦ ${p}leave`,
+    `│ ✦ ${p}setbio <text>`,
+    `│ ✦ ${p}setpp (reply to image)`,
+    `│ ✦ ${p}restart`,
     '╰──────────────⬣',
     '',
     `> ${BOT_NAME} • Powered by Rio Editz`
@@ -515,6 +595,7 @@ function menuButtons() {
       { title: '📥 DOWNLOAD', rows: [
         row('TikTok', 'Use .tt <link>', 'tt'),
         row('Facebook', 'Use .fb <link>', 'fb'),
+        row('Pinterest', 'Use .pin <link>', 'pin'),
         row('YouTube Song', 'Use .song <name or link>', 'song')
       ] },
       { title: '🎨 MEDIA', rows: [
@@ -525,7 +606,18 @@ function menuButtons() {
         row('Group Info', 'Current group details', 'groupinfo'),
         row('Group Help', 'Group commands', 'grouphelp')
       ] },
-      { title: '👑 OWNER', rows: [row('Status', 'Bot status', 'status')] }
+      { title: '👑 OWNER', rows: [
+        row('Status', 'Bot status', 'status'),
+        row('Mode', 'public / private', 'mode'),
+        row('Broadcast', 'Send text to all groups', 'broadcast'),
+        row('Block', 'Block a user', 'block'),
+        row('Unblock', 'Unblock a user', 'unblock'),
+        row('Join', 'Join a group by link', 'join'),
+        row('Leave', 'Leave this group', 'leave'),
+        row('Set Bio', 'Change bot bio', 'setbio'),
+        row('Set DP', 'Reply to an image', 'setpp'),
+        row('Restart', 'Restart the bot', 'restart')
+      ] }
     ])
   ];
   if (OWNER_NUMBER) buttons.push(urlBtn('👑 Chat Owner', `https://wa.me/${OWNER_NUMBER}`));
@@ -586,14 +678,62 @@ let YTDLP = process.env.YTDLP_PATH || (fs.existsSync(path.join(__dirname, 'bin',
 const MAX_DL_BYTES = Number(process.env.MAX_DL_MB || 50) * 1024 * 1024;
 const TIKTOK_HOSTS = /(^|\.)tiktok\.com$/i;
 const FB_HOSTS = /(^|\.)(facebook\.com|fb\.watch|fb\.com)$/i;
+const PIN_HOSTS = /(^|\.)(pinterest\.[a-z.]{2,}|pin\.it)$/i;
+const PINIMG_HOSTS = /(^|\.)pinimg\.com$/i;
 const pendingDl = new Map(); // token -> { info, platform, expires }
 
 function parseUrl(raw, platform) {
   let u;
   try { u = new URL(String(raw || '').trim()); } catch { return null; }
   if (!/^https?:$/.test(u.protocol)) return null;
-  const ok = platform === 'tiktok' ? TIKTOK_HOSTS.test(u.hostname) : FB_HOSTS.test(u.hostname);
-  return ok ? u.toString() : null;
+  const hosts = platform === 'tiktok' ? TIKTOK_HOSTS : platform === 'pinterest' ? PIN_HOSTS : FB_HOSTS;
+  return hosts.test(u.hostname) ? u.toString() : null;
+}
+
+// Pinterest: read the public pin page (og tags + embedded JSON) and pick the best image / video.
+const decodeHtml = (s) => String(s || '').replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+function parsePinHtml(html) {
+  const text = String(html || '').replace(/\\u002F/gi, '/').replace(/\\\//g, '/');
+  const meta = (name) => {
+    const m = text.match(new RegExp(`<meta[^>]+(?:property|name)=["']${name}["'][^>]+content=["']([^"']*)["']`, 'i'))
+      || text.match(new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${name}["']`, 'i'));
+    return m ? decodeHtml(m[1]) : '';
+  };
+  const pinHost = (u) => { try { return PINIMG_HOSTS.test(new URL(u).hostname); } catch { return false; } };
+
+  // video: prefer mp4 (720p first), skip HLS playlists
+  const mp4s = [...new Set(text.match(/https:\/\/v\d*\.pinimg\.com\/videos\/[^"'\\\s<>]+?\.mp4/g) || [])];
+  const video = mp4s.find((u) => /720p/i.test(u)) || mp4s[0] || (pinHost(meta('og:video')) && /\.mp4/i.test(meta('og:video')) ? meta('og:video') : '');
+
+  // image: original size when possible
+  let image = '';
+  const orig = text.match(/"orig"\s*:\s*\{[^}]*?"url"\s*:\s*"(https:\/\/i\.pinimg\.com\/[^"]+)"/);
+  if (orig) image = orig[1];
+  if (!image) {
+    const og = meta('og:image');
+    if (pinHost(og)) image = og.replace(/\/\d+x(\d+)?\//, '/originals/');
+  }
+  const title = (meta('og:title') || meta('twitter:title') || '').replace(/\s*\|\s*Pinterest.*$/i, '').trim();
+  const thumb = pinHost(meta('og:image')) ? meta('og:image') : image;
+  return { title, video: video || '', image: image || '', thumb };
+}
+
+async function pinterest(url) {
+  const res = await fetch(url, {
+    redirect: 'follow',
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+      'accept-language': 'en-US,en;q=0.9'
+    },
+    signal: AbortSignal.timeout(30000)
+  });
+  let finalHost = '';
+  try { finalHost = new URL(res.url).hostname; } catch {}
+  if (!PIN_HOSTS.test(finalHost)) throw new Error('Redirected outside Pinterest');
+  if (!res.ok) throw new Error(`Pinterest page gave HTTP ${res.status}`);
+  const parsed = parsePinHtml(await res.text());
+  if (!parsed.video && !parsed.image) throw new Error('No media found on that pin');
+  return { title: parsed.title, author: '', thumb: parsed.thumb || parsed.image, video: parsed.video, image: parsed.image, audio: null, headers: {} };
 }
 
 async function runYtDlp(url) {
@@ -658,6 +798,10 @@ async function ensureYtDlp() {
 const ytdlpReady = ensureYtDlp();
 
 async function resolveMedia(platform, url) {
+  if (platform === 'pinterest') {
+    try { return await pinterest(url); }
+    catch (err) { console.error('Pinterest scrape failed, trying yt-dlp:', err?.message || err); }
+  }
   if (platform === 'tiktok') {
     try { return await tikwm(url); }
     catch (err) { console.error('tikwm failed, trying yt-dlp:', err?.message || err); }
@@ -713,12 +857,12 @@ async function getVideoBuffer(info, token) {
 }
 
 async function startDownload(sock, jid, msg, platform, rawUrl) {
-  const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: msg });
-  const label = platform === 'tiktok' ? 'TikTok' : 'Facebook';
-  const cmd = platform === 'tiktok' ? 'tt' : 'fb';
+  const reply = (t) => say(sock, jid, t, msg);
+  const label = platform === 'tiktok' ? 'TikTok' : platform === 'pinterest' ? 'Pinterest' : 'Facebook';
+  const cmd = platform === 'tiktok' ? 'tt' : platform === 'pinterest' ? 'pin' : 'fb';
   const url = parseUrl(rawUrl, platform);
   if (!url) return reply(`❌ Send a valid ${label} link.\nExample: ${PREFIX}${cmd} <${label} link>`);
-  await reply(`⏳ Fetching ${label} video...`);
+  await reply(`⏳ Fetching ${label} ${platform === 'pinterest' ? 'pin' : 'video'}...`);
   let info;
   try { info = await resolveMedia(platform, url); }
   catch (err) {
@@ -726,6 +870,19 @@ async function startDownload(sock, jid, msg, platform, rawUrl) {
     return reply(`❌ Could not fetch that ${label} video. It may be private, removed, or the downloader is unavailable.`);
   }
   info.sourceUrl = url;
+
+  // Pinterest image pin: no format choice needed, send the picture straight away.
+  if (platform === 'pinterest' && info.image && !info.video) {
+    const cap = `📌 ${(info.title || 'Pinterest image').slice(0, 200)}\n\n> ${BOT_NAME}`;
+    let buf = null;
+    for (const candidate of [info.image, info.thumb]) {
+      if (!candidate) continue;
+      try { buf = await fetchBuffer(candidate); break; } catch (err) { console.error('Pinterest image download failed:', err?.message || err); }
+    }
+    if (!buf) return reply('❌ Could not download that image.');
+    return sock.sendMessage(jid, { image: buf, caption: cap }, { quoted: msg });
+  }
+
   const token = crypto.randomBytes(4).toString('hex');
   pendingDl.set(token, { info, platform, expires: Date.now() + 10 * 60 * 1000 });
   const p = PREFIX;
@@ -739,14 +896,14 @@ async function startDownload(sock, jid, msg, platform, rawUrl) {
   ].filter((l) => l !== null).join('\n');
   const buttons = [
     qr('🎬 Video', `${p}dl video ${token}`),
-    qr('🎵 Audio', `${p}dl audio ${token}`),
+    ...(platform === 'pinterest' ? [] : [qr('🎵 Audio', `${p}dl audio ${token}`)]),
     qr('📄 Document', `${p}dl doc ${token}`)
   ];
   return sendRich(sock, jid, { caption, buttons, footer: `${BOT_NAME} • Link valid for 10 min`, image: info.thumb || MENU_IMAGE }, msg);
 }
 
 async function sendDownload(sock, jid, msg, kind, token) {
-  const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: msg });
+  const reply = (t) => say(sock, jid, t, msg);
   const entry = pendingDl.get(String(token || ''));
   if (!entry || entry.expires < Date.now()) return reply(`⌛ This download request expired. Send the link again with ${PREFIX}tt or ${PREFIX}fb.`);
   const { info } = entry;
@@ -793,7 +950,7 @@ function ytSearchInfo(target) {
 }
 
 async function startSong(sock, jid, msg, query) {
-  const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: msg });
+  const reply = (t) => say(sock, jid, t, msg);
   if (!query) return reply(`🎵 Send a song name or YouTube link.\nExample: ${PREFIX}song shape of you`);
   let target = `ytsearch1:${query}`;
   if (/^https?:\/\//i.test(query)) {
@@ -832,7 +989,7 @@ async function startSong(sock, jid, msg, query) {
 }
 
 async function sendSong(sock, jid, msg, kind, token) {
-  const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: msg });
+  const reply = (t) => say(sock, jid, t, msg);
   const entry = pendingDl.get(String(token || ''));
   if (!entry || entry.platform !== 'youtube' || entry.expires < Date.now()) return reply(`⌛ This request expired. Search again with ${PREFIX}song.`);
   const { info } = entry;
@@ -889,7 +1046,35 @@ async function handleMessage(sock, msg, sessionId) {
   if (cooldowns.has(key) && now - cooldowns.get(key) < 700) return;
   cooldowns.set(key, now);
 
-  const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: msg });
+  const reply = (t) => say(sock, jid, t, msg);
+
+  // Who sent this? "owner" = the linked account itself or OWNER_NUMBER. "admin" = OWNER_NUMBER only (affects the whole server).
+  const senderNum = jidNum(msg.key.fromMe ? sock.user?.id : (msg.key.participant || jid));
+  const isOwner = !!msg.key.fromMe || senderNum === jidNum(sock.user?.id) || (!!OWNER_NUMBER && senderNum === OWNER_NUMBER);
+  const isAdmin = !!OWNER_NUMBER && senderNum === OWNER_NUMBER;
+  const OWNER_ONLY = new Set(['mode', 'broadcast', 'bc', 'block', 'unblock', 'join', 'leave', 'setbio', 'setpp', 'restart']);
+
+  if (getMode(sessionId) === 'private' && !isOwner) return; // private mode: only the owner can use the bot
+
+  const known = command in REACTIONS;
+  react(sock, jid, msg.key, known ? REACTIONS[command] : '❔'); // emoji reaction on the command message
+
+  if (OWNER_ONLY.has(command) && !isOwner) {
+    react(sock, jid, msg.key, '🚫');
+    return reply('🚫 This command is for the bot owner only.');
+  }
+
+  // user to act on: @mention, replied-to person, or a number typed after the command
+  const targetJid = () => {
+    const ctx = unwrapMessage(msg.message).extendedTextMessage?.contextInfo;
+    const mentioned = ctx?.mentionedJid?.[0];
+    if (mentioned) return mentioned;
+    if (ctx?.participant) return ctx.participant;
+    const num = (args[0] || '').replace(/\D/g, '');
+    if (num.length >= 8) return `${num}@s.whatsapp.net`;
+    if (!jid.endsWith('@g.us')) return jid;
+    return null;
+  };
 
   switch (command) {
     case 'menu':
@@ -905,6 +1090,9 @@ async function handleMessage(sock, msg, sessionId) {
     case 'fb':
     case 'facebook':
       return startDownload(sock, jid, msg, 'facebook', args[0]);
+    case 'pin':
+    case 'pinterest':
+      return startDownload(sock, jid, msg, 'pinterest', args[0]);
     case 'dlcheck': {
       const lines = ['🔍 *Downloader check*'];
       await ytdlpReady;
@@ -939,7 +1127,79 @@ async function handleMessage(sock, msg, sessionId) {
     case 'about':
       return reply(`🤖 *${BOT_NAME}*\nA multi-session WhatsApp MD bot.\nSend ${PREFIX}menu to see all commands.`);
     case 'owner':
-      return reply(OWNER_NUMBER ? `👑 Owner: https://wa.me/${OWNER_NUMBER}` : '👑 Owner contact is not set. Add OWNER_NUMBER in the environment variables.');
+    case 'creator': {
+      const num = OWNER_NUMBER || jidNum(sock.user?.id); // falls back to the linked account when OWNER_NUMBER is not set
+      if (!num) return reply('👑 Owner contact is not set. Add OWNER_NUMBER in the environment variables.');
+      const vcard = ['BEGIN:VCARD', 'VERSION:3.0', `FN:${BOT_NAME} Owner`, `ORG:${BOT_NAME};`, `TEL;type=CELL;type=VOICE;waid=${num}:+${num}`, 'END:VCARD'].join('\n');
+      await sock.sendMessage(jid, { contacts: { displayName: `${BOT_NAME} Owner`, contacts: [{ vcard }] } }, { quoted: msg });
+      return reply(`👑 *Owner:* https://wa.me/${num}`);
+    }
+
+    /* ----- owner commands ----- */
+    case 'mode': {
+      const m = (args[0] || '').toLowerCase();
+      if (m !== 'public' && m !== 'private') return reply(`⚙️ Current mode: *${getMode(sessionId)}*\nUse ${PREFIX}mode public or ${PREFIX}mode private\n(private = only the owner can use the bot)`);
+      setMode(sessionId, m);
+      return reply(`✅ Mode changed to *${m}*.`);
+    }
+    case 'broadcast':
+    case 'bc': {
+      const body = args.join(' ').trim();
+      if (!body) return reply(`📢 Usage: ${PREFIX}broadcast <text>\nSends the text to every group the bot is in.`);
+      const groups = Object.keys(await sock.groupFetchAllParticipating());
+      await reply(`📢 Sending to ${groups.length} group(s)...`);
+      let ok = 0;
+      for (const g of groups) {
+        try { await say(sock, g, `📢 *${BOT_NAME} Broadcast*\n\n${body}`); ok++; } catch (err) { console.error('Broadcast error:', err?.message || err); }
+        await sleep(2000); // slow on purpose, fast bulk sending gets accounts banned
+      }
+      return reply(`✅ Broadcast delivered to ${ok}/${groups.length} group(s).`);
+    }
+    case 'block':
+    case 'unblock': {
+      const target = targetJid();
+      if (!target) return reply(`Usage: ${PREFIX}${command} <number> (or reply to / @mention the user)`);
+      if (jidNum(target) === jidNum(sock.user?.id)) return reply("❌ I can't do that to myself.");
+      await sock.updateBlockStatus(target, command);
+      return say(sock, jid, `✅ ${command === 'block' ? 'Blocked' : 'Unblocked'} @${jidNum(target)}`, msg, { mentions: [target] });
+    }
+    case 'join': {
+      const code = (args[0] || '').match(/chat\.whatsapp\.com\/([A-Za-z0-9]+)/)?.[1];
+      if (!code) return reply(`Usage: ${PREFIX}join https://chat.whatsapp.com/xxxx`);
+      try { await sock.groupAcceptInvite(code); return reply('✅ Joined the group.'); }
+      catch (err) { console.error('Join error:', err?.message || err); return reply('❌ Could not join (link expired, revoked, or group needs approval).'); }
+    }
+    case 'leave': {
+      if (!jid.endsWith('@g.us')) return reply('This command only works in groups.');
+      await reply('👋 Leaving this group. Bye!');
+      return sock.groupLeave(jid);
+    }
+    case 'setbio': {
+      const bio = args.join(' ').trim();
+      if (!bio) return reply(`Usage: ${PREFIX}setbio <text>`);
+      await sock.updateProfileStatus(bio.slice(0, 139));
+      return reply('✅ Bio updated.');
+    }
+    case 'setpp': {
+      const ctx = unwrapMessage(msg.message).extendedTextMessage?.contextInfo;
+      const quoted = ctx?.quotedMessage ? unwrapMessage(ctx.quotedMessage) : null;
+      const own = unwrapMessage(msg.message);
+      let target = null;
+      if (quoted?.imageMessage) target = { key: { remoteJid: jid, id: ctx.stanzaId, participant: ctx.participant }, message: quoted };
+      else if (own.imageMessage) target = msg;
+      if (!target) return reply(`🖼️ Reply to an image with ${PREFIX}setpp to set it as the bot's profile picture.`);
+      try {
+        const buf = await downloadMediaMessage(target, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+        await sock.updateProfilePicture(sock.user.id, buf);
+        resetBotDp(sock); // refresh the DP shown on reply cards
+        return reply('✅ Profile picture updated. New replies will show it.');
+      } catch (err) { console.error('setpp error:', err?.message || err); return reply('❌ Could not update the profile picture.'); }
+    }
+    case 'restart': {
+      if (!isAdmin) return reply('🚫 Restart works only for the main OWNER_NUMBER, because it restarts every linked session.');
+      await reply('🔄 Restarting...');
+      return setTimeout(() => process.exit(0), 1500); // Render / pm2 starts it again automatically
+    }
     case 'media':
     case 'sticker':
       return reply(`🎨 *MEDIA MENU*\n${PREFIX}sticker — sticker help\n${PREFIX}media — media command guide\n\nMedia conversion plugins can be added later.`);
