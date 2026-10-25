@@ -8,6 +8,7 @@ import makeWASocket, {
 import pino from 'pino';
 import QRCode from 'qrcode';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
@@ -442,6 +443,7 @@ function menuCaption(name) {
     '╭─❮ 📥 *DOWNLOAD* ❯',
     `│ ✦ ${p}tt <link>`,
     `│ ✦ ${p}fb <link>`,
+    `│ ✦ ${p}song <name/link>`,
     '╰──────────────⬣',
     '',
     '╭─❮ 🎨 *MEDIA* ❯',
@@ -482,7 +484,8 @@ function menuButtons() {
       ] },
       { title: '📥 DOWNLOAD', rows: [
         row('TikTok', 'Use .tt <link>', 'tt'),
-        row('Facebook', 'Use .fb <link>', 'fb')
+        row('Facebook', 'Use .fb <link>', 'fb'),
+        row('YouTube Song', 'Use .song <name or link>', 'song')
       ] },
       { title: '🎨 MEDIA', rows: [
         row('Sticker', 'Sticker help', 'sticker'),
@@ -572,7 +575,9 @@ async function runYtDlp(url) {
         try {
           const j = JSON.parse(stdout);
           if (!j.url) return reject(new Error('yt-dlp returned no direct url'));
-          resolve({ title: j.title || '', author: j.uploader || '', thumb: j.thumbnail || '', video: j.url, audio: null, headers: j.http_headers || {} });
+          const headers = { ...(j.http_headers || {}) };
+          if (j.cookies) headers.Cookie = j.cookies; // TikTok's CDN answers 403 without these
+          resolve({ title: j.title || '', author: j.uploader || '', thumb: j.thumbnail || '', video: j.url, audio: null, headers, viaYtDlp: true });
         } catch (e) { reject(e); }
       });
   });
@@ -589,7 +594,7 @@ async function tikwm(url, attempt = 0) {
   let j;
   try { j = JSON.parse(text); }
   catch {
-    if (attempt < 1) { await sleep(1500); return tikwm(url, attempt + 1); } // free API allows ~1 request/second
+    if (attempt < 1 && res.status !== 403) { await sleep(1500); return tikwm(url, attempt + 1); } // free API allows ~1 request/second
     throw new Error(`tikwm gave an empty/invalid reply (HTTP ${res.status})`);
   }
   if (j.code !== 0 || !j.data) throw new Error(j.msg || 'tikwm failed');
@@ -640,6 +645,40 @@ async function fetchBuffer(url, headers = {}) {
   return buf;
 }
 
+// Optional YouTube cookies (Netscape cookies.txt content in the YTDLP_COOKIES env) for when YouTube asks "confirm you're not a bot".
+const COOKIE_FILE = path.join(os.tmpdir(), 'ytdlp-cookies.txt');
+if (process.env.YTDLP_COOKIES) { try { fs.writeFileSync(COOKIE_FILE, process.env.YTDLP_COOKIES.replace(/\\n/g, '\n'), { mode: 0o600 }); } catch {} }
+const cookieArgs = () => (fs.existsSync(COOKIE_FILE) ? ['--cookies', COOKIE_FILE] : []);
+
+// Lets yt-dlp itself download the file (it knows the right headers/cookies for each site).
+async function ytDlpFile(url, token, { format = 'best[ext=mp4]/best', cookies = false } = {}) {
+  await ytdlpReady;
+  const prefix = `rio-${token}-${Math.random().toString(36).slice(2, 6)}`;
+  const template = path.join(os.tmpdir(), `${prefix}.%(ext)s`);
+  const args = ['--no-playlist', '--no-warnings', '--max-filesize', `${Math.round(MAX_DL_BYTES / 1048576)}M`, '-f', format, '-o', template, ...(cookies ? cookieArgs() : []), '--', url];
+  const output = await new Promise((resolve, reject) => {
+    execFile(YTDLP, args, { timeout: 240000, maxBuffer: 5 * 1024 * 1024 }, (err, stdout, stderr) => (err ? reject(err) : resolve(`${stdout}\n${stderr}`)));
+  });
+  const file = fs.readdirSync(os.tmpdir()).find((f) => f.startsWith(prefix) && !f.endsWith('.part'));
+  if (!file) throw new Error(/larger than/i.test(output) ? 'TOO_BIG' : 'yt-dlp produced no file');
+  const full = path.join(os.tmpdir(), file);
+  try {
+    const buf = fs.readFileSync(full);
+    if (buf.length > MAX_DL_BYTES) throw new Error('TOO_BIG');
+    return { buf, ext: path.extname(file).slice(1).toLowerCase() };
+  } finally { try { fs.unlinkSync(full); } catch {} }
+}
+const ytDlpDownload = async (url, token) => (await ytDlpFile(url, token)).buf;
+
+async function getVideoBuffer(info, token) {
+  try { return await fetchBuffer(info.video, info.headers); }
+  catch (err) {
+    if (err?.message === 'TOO_BIG' || !info.sourceUrl) throw err;
+    console.error('Direct download failed, using yt-dlp download:', err?.message || err);
+    return ytDlpDownload(info.sourceUrl, token);
+  }
+}
+
 async function startDownload(sock, jid, msg, platform, rawUrl) {
   const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: msg });
   const label = platform === 'tiktok' ? 'TikTok' : 'Facebook';
@@ -653,6 +692,7 @@ async function startDownload(sock, jid, msg, platform, rawUrl) {
     console.error(`${label} resolve error:`, err?.stderr || err?.message || err);
     return reply(`❌ Could not fetch that ${label} video. It may be private, removed, or the downloader is unavailable.`);
   }
+  info.sourceUrl = url;
   const token = crypto.randomBytes(4).toString('hex');
   pendingDl.set(token, { info, platform, expires: Date.now() + 10 * 60 * 1000 });
   const p = PREFIX;
@@ -681,11 +721,10 @@ async function sendDownload(sock, jid, msg, kind, token) {
   try {
     await reply(kind === 'audio' ? '⏳ Preparing audio...' : '⏳ Downloading...');
     if (kind === 'audio') {
-      const src = info.audio || info.video;
-      const buf = await fetchBuffer(src, info.audio ? {} : info.headers);
+      const buf = info.audio ? await fetchBuffer(info.audio) : await getVideoBuffer(info, token);
       return sock.sendMessage(jid, { audio: buf, mimetype: info.audio ? 'audio/mpeg' : 'audio/mp4', ptt: false }, { quoted: msg });
     }
-    const buf = await fetchBuffer(info.video, info.headers);
+    const buf = await getVideoBuffer(info, token);
     if (kind === 'doc') {
       return sock.sendMessage(jid, { document: buf, mimetype: 'video/mp4', fileName: `${safeName}.mp4`, caption: `📄 ${BOT_NAME}` }, { quoted: msg });
     }
@@ -693,6 +732,92 @@ async function sendDownload(sock, jid, msg, kind, token) {
   } catch (err) {
     console.error('Send download error:', err?.message || err);
     if (err?.message === 'TOO_BIG') return reply(`❌ File is larger than ${Math.round(MAX_DL_BYTES / 1048576)} MB, so I can't send it.`);
+    return reply('❌ Download failed. Please try again.');
+  }
+}
+
+/* ---------- YouTube song / video ---------- */
+const YT_HOSTS = /(^|\.)(youtube\.com|youtu\.be|music\.youtube\.com)$/i;
+const MAX_SONG_MIN = Number(process.env.MAX_SONG_MIN || 20);
+
+function ytSearchInfo(target) {
+  return new Promise(async (resolve, reject) => {
+    await ytdlpReady;
+    execFile(YTDLP, ['-J', '--no-playlist', '--no-warnings', '--skip-download', ...cookieArgs(), '--', target],
+      { timeout: 90000, maxBuffer: 30 * 1024 * 1024 }, (err, stdout) => {
+        if (err) return reject(err);
+        try {
+          const j = JSON.parse(stdout);
+          const e = j.entries ? j.entries[0] : j;
+          if (!e) return reject(new Error('NO_RESULT'));
+          resolve({
+            title: e.title || 'Unknown', author: e.uploader || e.channel || '', duration: Number(e.duration || 0),
+            thumb: e.thumbnail || '', sourceUrl: e.webpage_url || (e.id ? `https://www.youtube.com/watch?v=${e.id}` : '')
+          });
+        } catch (x) { reject(x); }
+      });
+  });
+}
+
+async function startSong(sock, jid, msg, query) {
+  const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: msg });
+  if (!query) return reply(`🎵 Send a song name or YouTube link.\nExample: ${PREFIX}song shape of you`);
+  let target = `ytsearch1:${query}`;
+  if (/^https?:\/\//i.test(query)) {
+    let u; try { u = new URL(query); } catch {}
+    if (!u || !YT_HOSTS.test(u.hostname)) return reply('❌ Only YouTube links are supported here.');
+    target = u.toString();
+  }
+  await reply('🔎 Searching YouTube...');
+  let info;
+  try { info = await ytSearchInfo(target); }
+  catch (err) {
+    console.error('YouTube search error:', err?.stderr || err?.message || err);
+    const bot = /confirm you.?re not a bot|sign in/i.test(String(err?.stderr || err?.message));
+    return reply(bot ? '❌ YouTube blocked this server (bot check). Add YouTube cookies in the YTDLP_COOKIES env, or try again later.' : '❌ Could not find or open that video.');
+  }
+  if (info.duration && info.duration > MAX_SONG_MIN * 60) return reply(`❌ That video is longer than ${MAX_SONG_MIN} minutes.`);
+  const token = crypto.randomBytes(4).toString('hex');
+  pendingDl.set(token, { info, platform: 'youtube', expires: Date.now() + 10 * 60 * 1000 });
+  const mins = info.duration ? `${Math.floor(info.duration / 60)}:${String(Math.floor(info.duration % 60)).padStart(2, '0')}` : '-';
+  const p = PREFIX;
+  const caption = [
+    '╭━━━〔 🎵 *YOUTUBE DOWNLOADER* 〕━━━⬣',
+    `┃ 🎬 ${info.title.slice(0, 120)}`,
+    info.author ? `┃ 👤 ${info.author}` : null,
+    `┃ ⏱️ ${mins}`,
+    '╰━━━━━━━━━━━━━━━━━━━━⬣',
+    '',
+    '👇 Select the file format'
+  ].filter((l) => l !== null).join('\n');
+  const buttons = [
+    qr('🎵 Audio', `${p}ytdl audio ${token}`),
+    qr('📄 Document', `${p}ytdl doc ${token}`),
+    qr('🎬 Video', `${p}ytdl video ${token}`)
+  ];
+  return sendRich(sock, jid, { caption, buttons, footer: `${BOT_NAME} • Link valid for 10 min`, image: info.thumb || MENU_IMAGE }, msg);
+}
+
+async function sendSong(sock, jid, msg, kind, token) {
+  const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: msg });
+  const entry = pendingDl.get(String(token || ''));
+  if (!entry || entry.platform !== 'youtube' || entry.expires < Date.now()) return reply(`⌛ This request expired. Search again with ${PREFIX}song.`);
+  const { info } = entry;
+  const name = (info.title || 'song').replace(/[^\w\- ]+/g, '').trim().slice(0, 60) || 'song';
+  try {
+    await reply(kind === 'video' ? '⏳ Downloading video...' : '⏳ Downloading audio...');
+    if (kind === 'video') {
+      const { buf } = await ytDlpFile(info.sourceUrl, token, { format: 'best[ext=mp4][height<=480]/best[ext=mp4]/best', cookies: true });
+      return sock.sendMessage(jid, { video: buf, mimetype: 'video/mp4', caption: `🎬 ${info.title.slice(0, 200)}\n\n> ${BOT_NAME}` }, { quoted: msg });
+    }
+    const { buf, ext } = await ytDlpFile(info.sourceUrl, token, { format: 'bestaudio[ext=m4a]/bestaudio', cookies: true });
+    const mimes = { m4a: 'audio/mp4', mp4: 'audio/mp4', mp3: 'audio/mpeg', ogg: 'audio/ogg; codecs=opus', opus: 'audio/ogg; codecs=opus' };
+    if (kind === 'audio' && mimes[ext]) return sock.sendMessage(jid, { audio: buf, mimetype: mimes[ext], ptt: false }, { quoted: msg });
+    return sock.sendMessage(jid, { document: buf, mimetype: mimes[ext] || 'application/octet-stream', fileName: `${name}.${ext || 'm4a'}`, caption: `🎵 ${info.title.slice(0, 200)}` }, { quoted: msg });
+  } catch (err) {
+    console.error('Song download error:', err?.stderr || err?.message || err);
+    if (err?.message === 'TOO_BIG') return reply(`❌ File is larger than ${Math.round(MAX_DL_BYTES / 1048576)} MB, so I can't send it.`);
+    if (/confirm you.?re not a bot|sign in/i.test(String(err?.stderr || err?.message))) return reply('❌ YouTube blocked this server (bot check). Add YouTube cookies in the YTDLP_COOKIES env, or try again later.');
     return reply('❌ Download failed. Please try again.');
   }
 }
@@ -761,6 +886,13 @@ async function handleMessage(sock, msg, sessionId) {
       lines.push(`🧠 RAM: ${mem()}`, `📦 Max file: ${Math.round(MAX_DL_BYTES / 1048576)} MB`);
       return reply(lines.join('\n'));
     }
+    case 'song':
+    case 'play':
+    case 'yt':
+    case 'ytmp3':
+      return startSong(sock, jid, msg, args.join(' ').trim());
+    case 'ytdl':
+      return sendSong(sock, jid, msg, args[0], args[1]);
     case 'dl':
       return sendDownload(sock, jid, msg, args[0], args[1]);
     case 'ping': {
