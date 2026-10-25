@@ -32,12 +32,21 @@
     <h2>Link your <span class="grad">WhatsApp</span></h2>
     <p class="muted">Enter your own number to get a pair code. No sign-up, no password.</p>
 
-    <label for="phone">Phone number with country code</label>
-    <div class="field">
-      <span class="plus">+</span>
-      <input id="phone" inputmode="numeric" autocomplete="tel" placeholder="947XXXXXXXX" maxlength="18">
+    <div class="tabs" id="tabs" data-mode="code" role="tablist">
+      <button type="button" class="tab on" data-mode="code" role="tab">📱 Pair Code</button>
+      <button type="button" class="tab" data-mode="qr" role="tab">🔳 QR Code</button>
+      <span class="slider"></span>
     </div>
-    <p class="hint">Digits only, with country code. No spaces or dashes.</p>
+
+    <div id="phoneBox">
+      <label for="phone">Phone number with country code</label>
+      <div class="field">
+        <span class="plus">+</span>
+        <input id="phone" inputmode="numeric" autocomplete="tel" placeholder="947XXXXXXXX" maxlength="18">
+      </div>
+      <p class="hint">Digits only, with country code. No spaces or dashes.</p>
+    </div>
+    <p class="hint" id="qrHint" hidden>No number needed. Tap the button, then scan the QR with WhatsApp.</p>
 
     <button id="connect" class="btn"><span class="label">Generate Pair Code</span><span class="spin" aria-hidden="true"></span></button>
 
