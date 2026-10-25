@@ -2,7 +2,8 @@ import 'dotenv/config';
 import express from 'express';
 import makeWASocket, {
   useMultiFileAuthState, DisconnectReason, Browsers, fetchLatestBaileysVersion,
-  proto, generateWAMessageFromContent, prepareWAMessageMedia, isJidGroup
+  proto, generateWAMessageFromContent, prepareWAMessageMedia, isJidGroup,
+  BufferJSON, initAuthCreds
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -10,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
+import { MongoClient } from 'mongodb';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -87,9 +89,85 @@ function destroySession(id, { deleteFiles = true } = {}) {
     try { record.sock?.end(undefined); } catch {}
     sessions.delete(id);
   }
-  if (deleteFiles) {
-    try { fs.rmSync(sessionPath(id), { recursive: true, force: true }); } catch {}
-  }
+  if (deleteFiles) deleteSessionData(id).catch(() => {});
+}
+
+
+/* ---------- session storage (MongoDB or local files) ---------- */
+const MONGO_URL = (process.env.MONGO_URL || '').trim();
+const MONGO_DB = (process.env.MONGO_DB || 'rio_x_md').trim();
+let mongoCol = null;
+
+async function getMongoCol() {
+  if (!MONGO_URL) return null;
+  if (mongoCol) return mongoCol;
+  const client = new MongoClient(MONGO_URL, { serverSelectionTimeoutMS: 15000 });
+  await client.connect();
+  const col = client.db(MONGO_DB).collection('auth');
+  await col.createIndex({ sid: 1 });
+  mongoCol = col;
+  console.log('Auth storage: MongoDB (sessions survive redeploys).');
+  return col;
+}
+
+async function useMongoAuthState(col, sid) {
+  const id = (k) => `${sid}:${k}`;
+  const write = (k, v) => col.updateOne({ _id: id(k) }, { $set: { sid, data: JSON.stringify(v, BufferJSON.replacer) } }, { upsert: true });
+  const read = async (k) => {
+    const doc = await col.findOne({ _id: id(k) });
+    return doc ? JSON.parse(doc.data, BufferJSON.reviver) : null;
+  };
+  const remove = (k) => col.deleteOne({ _id: id(k) });
+
+  const creds = (await read('creds')) || initAuthCreds();
+  return {
+    state: {
+      creds,
+      keys: {
+        get: async (type, ids) => {
+          const data = {};
+          await Promise.all(ids.map(async (keyId) => {
+            let value = await read(`${type}-${keyId}`);
+            if (type === 'app-state-sync-key' && value) value = proto.Message.AppStateSyncKeyData.fromObject(value);
+            data[keyId] = value;
+          }));
+          return data;
+        },
+        set: async (data) => {
+          const tasks = [];
+          for (const category of Object.keys(data)) {
+            for (const keyId of Object.keys(data[category])) {
+              const value = data[category][keyId];
+              const k = `${category}-${keyId}`;
+              tasks.push(value ? write(k, value) : remove(k));
+            }
+          }
+          await Promise.all(tasks);
+        }
+      }
+    },
+    saveCreds: () => write('creds', creds)
+  };
+}
+
+async function getAuthState(sid) {
+  let col = null;
+  try { col = await getMongoCol(); }
+  catch (err) { console.error('MongoDB connection failed, using local files:', err?.message || err); }
+  if (col) return useMongoAuthState(col, sid);
+  return useMultiFileAuthState(sessionPath(sid));
+}
+
+async function deleteSessionData(sid) {
+  try { fs.rmSync(sessionPath(sid), { recursive: true, force: true }); } catch {}
+  try { const col = await getMongoCol(); if (col) await col.deleteMany({ sid }); } catch (err) { console.error('Mongo delete error:', err?.message || err); }
+}
+
+async function isMongoSessionRegistered(col, sid) {
+  try {
+    const doc = await col.findOne({ _id: `${sid}:creds` });
+    return !!doc && JSON.parse(doc.data).registered === true;
+  } catch { return false; }
 }
 
 /* ---------- WhatsApp session ---------- */
@@ -107,7 +185,7 @@ async function startSession(id, phone = '') {
   sessions.set(id, record);
 
   try {
-    const { state, saveCreds } = await useMultiFileAuthState(sessionPath(id));
+    const { state, saveCreds } = await getAuthState(id);
     record.state = state;
 
     const config = {
@@ -177,7 +255,7 @@ async function startSession(id, phone = '') {
         if (statusCode === DisconnectReason.loggedOut) {
           record.status = 'logged_out';
           console.log(`Session ${id} logged out; deleting its files.`);
-          try { fs.rmSync(sessionPath(id), { recursive: true, force: true }); } catch {}
+          deleteSessionData(id).catch(() => {});
           clearTimers(record);
           setTimeout(() => sessions.delete(id), 60 * 1000).unref?.();
           return;
@@ -216,6 +294,21 @@ async function startSession(id, phone = '') {
 
 // Re-open every previously paired session after a restart/redeploy.
 async function restoreSessions() {
+  let col = null;
+  try { col = await getMongoCol(); } catch (err) { console.error('MongoDB unavailable during restore:', err?.message || err); }
+  if (col) {
+    const sids = (await col.distinct('sid')).filter(safeId);
+    for (const sid of sids) {
+      if (sessions.has(sid)) continue;
+      if (!(await isMongoSessionRegistered(col, sid))) { await deleteSessionData(sid); continue; } // unfinished pairing
+      try {
+        await startSession(sid);
+        console.log(`Restoring session ${sid} (MongoDB)`);
+      } catch (err) { console.error(`Could not restore ${sid}:`, err?.message || err); }
+      await sleep(1500);
+    }
+    return;
+  }
   let entries = [];
   try { entries = fs.readdirSync(SESSION_ROOT, { withFileTypes: true }); } catch { return; }
   for (const entry of entries) {
@@ -673,7 +766,7 @@ app.get('/api/session/:id', apiLimiter, authRequired, async (req, res) => {
   res.json({ id, status: record.status, phone: record.phone, pairCode: record.pairCode, qrDataUrl, error: record.error || null });
 });
 
-app.get('/health', (_req, res) => res.json({ ok: true, bot: BOT_NAME, activeSessions: sessions.size }));
+app.get('/health', (_req, res) => res.json({ ok: true, bot: BOT_NAME, activeSessions: sessions.size, storage: mongoCol ? 'mongodb' : 'files' }));
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`${BOT_NAME} pairing site listening on port ${PORT}`);
