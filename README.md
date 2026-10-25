@@ -22,7 +22,7 @@ Open `http://localhost:3000`, enter the same `PAIRING_API_KEY`, your number (dig
 Paired sessions are restored automatically from `SESSION_DIR`. Unpaired attempts expire after 5 minutes. Logged-out sessions are deleted.
 
 ## Commands
-`.tt <link>` / `.fb <link>` (download), `.menu` / `.help` (image + buttons), `.alive`, `.ping`, `.owner`, `.runtime`, `.about`, `.media` / `.sticker`, `.groupinfo`, `.grouphelp`, `.status`
+`.tt <link>` / `.fb <link>` / `.pin <link>` (download), `.menu` / `.help` (image + buttons), `.alive`, `.ping`, `.owner`, `.runtime`, `.about`, `.media` / `.sticker`, `.groupinfo`, `.grouphelp`, `.status`
 (Also works if you send `menu` or `help` without the prefix.)
 
 ## Security
@@ -42,3 +42,14 @@ Paired sessions are restored automatically from `SESSION_DIR`. Unpaired attempts
 
 ## MongoDB session storage
 Set `MONGO_URL` (MongoDB Atlas free cluster) and WhatsApp sessions are stored in the database instead of files, so they survive redeploys and restarts, even on Render free. Without `MONGO_URL` the bot uses the `SESSION_DIR` files as before. In Atlas, allow network access from `0.0.0.0/0` (Network Access) so Render can connect.
+
+## Pinterest downloader
+`.pin <pinterest or pin.it link>` — image pins are sent straight away (original size when available); video pins show **Video / Document** buttons. It reads the public pin page and falls back to yt-dlp.
+
+## Emoji reactions & DP card
+Every command message gets an emoji reaction (🏓 for ping, 🎵 for tt, 📌 for pin ...). Every text reply carries a link-preview style card with the bot's profile picture (falls back to `MENU_IMAGE` if the account has no DP). Change the card link with `CARD_URL`. After `.setpp` the DP card refreshes automatically.
+
+## Owner commands
+Work for the linked account itself or the number in `OWNER_NUMBER`:
+`.mode public|private` (private = only the owner can use the bot), `.broadcast <text>` (all groups, 2 s apart), `.block` / `.unblock` (number, reply or @mention), `.join <group link>`, `.leave`, `.setbio <text>`, `.setpp` (reply to an image), `.restart` (only the main `OWNER_NUMBER`, restarts every session).
+`.owner` sends the owner contact card (uses the linked number when `OWNER_NUMBER` is empty). The mode is saved in `SESSION_DIR/_settings.json`.
