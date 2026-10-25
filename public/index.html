@@ -2,65 +2,99 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#010101">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#050505">
 <title>RIO X MD • Link your WhatsApp</title>
-<meta name="description" content="Link your WhatsApp to RIO X MD with a pair code. Fast, free and private.">
+<meta name="description" content="Link your WhatsApp to RIO X MD with a pair code or QR. Fast, free and private.">
+<meta property="og:title" content="RIO X MD • Link your WhatsApp">
+<meta property="og:description" content="Get your pair code in seconds and run RIO X MD on your own WhatsApp.">
+<meta property="og:type" content="website">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400;12..96,600;12..96,800&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<div class="bg" aria-hidden="true"><span class="orb o1"></span><span class="orb o2"></span><span class="orb o3"></span><span class="grid"></span></div>
+<div class="aurora" aria-hidden="true"><i></i><i></i><i></i></div>
 
-<main class="wrap">
-  <header>
-    <div class="logo"><span>RX</span></div>
-    <div class="title">
-      <h1 class="glitch" data-text="RIO X MD">RIO X MD</h1>
-      <p>WhatsApp MD • Pairing Portal</p>
-    </div>
-    <span class="live" title="Bots currently running"><i></i><b id="online">–</b><em>online</em></span>
-  </header>
+<header class="top" id="top">
+  <div class="wrap">
+    <a class="brand" href="/" aria-label="RIO X MD home">
+      <img class="mark" src="/ghost.png" alt="" width="34" height="41">
+      <span class="wordmark">
+        <span class="w-top">RIO<span class="x">X</span>MD</span>
+        <span class="w-bot">WHATSAPP PAIRING PORTAL</span>
+      </span>
+    </a>
+    <span class="live" title="Bots currently running"><span class="dot" aria-hidden="true"></span><span><b id="online">–</b> <small>online</small></span></span>
+  </div>
+</header>
 
-  <section class="card" id="card">
-    <ol class="steps" id="steps" aria-label="Progress">
-      <li class="on"><i>1</i><span>Number</span></li>
-      <li><i>2</i><span>Code</span></li>
-      <li><i>3</i><span>Link</span></li>
-      <li><i>4</i><span>Done</span></li>
-    </ol>
-
-    <h2>Link your <span class="grad">WhatsApp</span></h2>
-    <p class="muted">Enter your own number to get a pair code. No sign-up, no password.</p>
-
-    <div class="tabs" id="tabs" data-mode="code" role="tablist">
-      <button type="button" class="tab on" data-mode="code" role="tab">📱 Pair Code</button>
-      <button type="button" class="tab" data-mode="qr" role="tab">🔳 QR Code</button>
-      <span class="slider"></span>
-    </div>
-
-    <div id="phoneBox">
-      <label for="phone">Phone number with country code</label>
-      <div class="field">
-        <span class="plus">+</span>
-        <input id="phone" inputmode="numeric" autocomplete="tel" placeholder="947XXXXXXXX" maxlength="18">
+<main>
+  <div class="wrap">
+    <section class="hero">
+      <div class="hero-mark" aria-hidden="true">
+        <span class="ring"></span><span class="ring r2"></span>
+        <img class="hero-ghost" src="/ghost.png" alt="">
       </div>
-      <p class="hint">Digits only, with country code. No spaces or dashes.</p>
-    </div>
-    <p class="hint" id="qrHint" hidden>No number needed. Tap the button, then scan the QR with WhatsApp.</p>
+      <p class="eyebrow"><span class="dot" aria-hidden="true"></span>Free • No sign-up • Private</p>
+      <h1>Link your <span class="grad">WhatsApp</span><br>in seconds</h1>
+      <p class="lede">Get a pair code (or scan a QR), and RIO X MD starts working on your own number. No password needed.</p>
+    </section>
 
-    <button id="connect" class="btn"><span class="label">Generate Pair Code</span><span class="spin" aria-hidden="true"></span></button>
+    <section class="card" id="card">
+      <ol class="steps" id="steps" aria-label="Progress">
+        <li class="on"><i>1</i><span>Number</span></li>
+        <li><i>2</i><span>Code</span></li>
+        <li><i>3</i><span>Link</span></li>
+        <li><i>4</i><span>Done</span></li>
+      </ol>
 
-    <div id="result" class="result" hidden aria-live="polite"></div>
-  </section>
+      <div class="tabs" id="tabs" data-mode="code" role="tablist">
+        <span class="slider" aria-hidden="true"></span>
+        <button type="button" class="tab on" data-mode="code" role="tab">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="2" width="10" height="20" rx="2.5"/><path d="M11 18h2"/></svg>Pair Code
+        </button>
+        <button type="button" class="tab" data-mode="qr" role="tab">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h2v2h-2zM18 14h2v2h-2zM14 18h2v2h-2zM18 18h2v2h-2z"/></svg>QR Code
+        </button>
+      </div>
 
-  <section class="how">
-    <div class="tile"><b>1</b><p>Enter your number and tap <em>Generate Pair Code</em>.</p></div>
-    <div class="tile"><b>2</b><p>On WhatsApp: <em>Linked devices → Link a device → Link with phone number</em>.</p></div>
-    <div class="tile"><b>3</b><p>Type the code. Then send <em>.menu</em> in any chat.</p></div>
-  </section>
+      <div id="phoneBox">
+        <label for="phone">Phone number with country code</label>
+        <div class="field">
+          <span class="plus">+</span>
+          <input id="phone" inputmode="numeric" autocomplete="tel" placeholder="947XXXXXXXX" maxlength="18">
+        </div>
+        <p class="hint">Digits only, with country code. No spaces or dashes.</p>
+      </div>
+      <p class="hint" id="qrHint" hidden>No number needed. Tap the button, then scan the QR with WhatsApp.</p>
 
-  <footer>RIO X MD • Use your own account only. Never share your pair code.</footer>
+      <button id="connect" class="btn" type="button"><span class="label">Generate Pair Code</span><span class="spin" aria-hidden="true"></span></button>
+
+      <div id="result" class="result" hidden aria-live="polite"></div>
+    </section>
+
+    <section class="perks" aria-label="Why RIO X MD">
+      <div><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z"/></svg><b>Fast</b><span>Code in seconds</span></div>
+      <div><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg><b>Private</b><span>Your account only</span></div>
+      <div><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/></svg><b>Free</b><span>No cost, no ads</span></div>
+    </section>
+
+    <section class="how" aria-label="How it works">
+      <div class="tile"><b>1</b><p>Enter your number and tap <em>Generate Pair Code</em>.</p></div>
+      <div class="tile"><b>2</b><p>On WhatsApp: <em>Linked devices → Link a device → Link with phone number</em>.</p></div>
+      <div class="tile"><b>3</b><p>Type the code. Then send <em>.menu</em> in any chat.</p></div>
+    </section>
+  </div>
 </main>
+
+<footer>
+  <div class="wrap">RIO X MD • Powered by Rio Editz<br><small>Use your own account only. Never share your pair code.</small></div>
+</footer>
 <script src="/script.js"></script>
 </body>
 </html>
