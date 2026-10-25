@@ -3,7 +3,7 @@ import express from 'express';
 import makeWASocket, {
   useMultiFileAuthState, DisconnectReason, Browsers, fetchLatestBaileysVersion,
   proto, generateWAMessageFromContent, prepareWAMessageMedia, isJidGroup,
-  BufferJSON, initAuthCreds
+  BufferJSON, initAuthCreds, makeCacheableSignalKeyStore
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -13,6 +13,18 @@ import crypto from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { MongoClient } from 'mongodb';
 import { fileURLToPath } from 'node:url';
+
+// libsignal prints huge session dumps with console.* on every key mismatch; drop that noise.
+const NOISE = /^(Closing session|Closing open session|Session error|Failed to decrypt message|Removing old closed session|Migrating session|Decrypted message with closed session|Bad MAC)/;
+for (const level of ['log', 'info', 'warn', 'error']) {
+  const original = console[level].bind(console);
+  console[level] = (...args) => {
+    const first = args[0];
+    if (typeof first === 'string' && NOISE.test(first)) return;
+    if (first && typeof first === 'object' && first.constructor?.name === 'SessionEntry') return;
+    original(...args);
+  };
+}
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 3000);
@@ -189,7 +201,7 @@ async function startSession(id, phone = '') {
     record.state = state;
 
     const config = {
-      auth: state,
+      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
       logger,
       browser: Browsers.ubuntu(BOT_NAME),
       printQRInTerminal: false,
@@ -538,7 +550,7 @@ async function sendRich(sock, jid, { caption, buttons, footer, image = MENU_IMAG
 
 /* ---------- downloader (TikTok / Facebook) ---------- */
 const YTDLP = process.env.YTDLP_PATH || (fs.existsSync(path.join(__dirname, 'bin', 'yt-dlp')) ? path.join(__dirname, 'bin', 'yt-dlp') : 'yt-dlp');
-const MAX_DL_BYTES = Number(process.env.MAX_DL_MB || 90) * 1024 * 1024;
+const MAX_DL_BYTES = Number(process.env.MAX_DL_MB || 50) * 1024 * 1024;
 const TIKTOK_HOSTS = /(^|\.)tiktok\.com$/i;
 const FB_HOSTS = /(^|\.)(facebook\.com|fb\.watch|fb\.com)$/i;
 const pendingDl = new Map(); // token -> { info, platform, expires }
@@ -602,7 +614,7 @@ async function startDownload(sock, jid, msg, platform, rawUrl) {
   let info;
   try { info = await resolveMedia(platform, url); }
   catch (err) {
-    console.error(`${label} resolve error:`, err?.message || err);
+    console.error(`${label} resolve error:`, err?.stderr || err?.message || err);
     return reply(`❌ Could not fetch that ${label} video. It may be private, removed, or the downloader is unavailable.`);
   }
   const token = crypto.randomBytes(4).toString('hex');
@@ -699,6 +711,19 @@ async function handleMessage(sock, msg, sessionId) {
     case 'fb':
     case 'facebook':
       return startDownload(sock, jid, msg, 'facebook', args[0]);
+    case 'dlcheck': {
+      const lines = ['🔍 *Downloader check*'];
+      try {
+        const v = await new Promise((resolve, reject) => execFile(YTDLP, ['--version'], { timeout: 15000 }, (e, out) => (e ? reject(e) : resolve(String(out).trim()))));
+        lines.push(`✅ yt-dlp: ${v}`);
+      } catch (e) { lines.push(`❌ yt-dlp not found (${e?.code || e?.message}). Fix the Render Build Command.`); }
+      try {
+        const info = await tikwm('https://www.tiktok.com/@scout2015/video/6718335390845095173');
+        lines.push(info.video ? '✅ TikTok API (tikwm): working' : '⚠️ TikTok API replied without a video');
+      } catch (e) { lines.push(`❌ TikTok API (tikwm): ${e?.message || e}`); }
+      lines.push(`🧠 RAM: ${mem()}`, `📦 Max file: ${Math.round(MAX_DL_BYTES / 1048576)} MB`);
+      return reply(lines.join('\n'));
+    }
     case 'dl':
       return sendDownload(sock, jid, msg, args[0], args[1]);
     case 'ping': {
