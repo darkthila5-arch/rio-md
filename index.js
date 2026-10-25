@@ -9,6 +9,7 @@ import QRCode from 'qrcode';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -333,6 +334,11 @@ function menuCaption(name) {
     `│ ✦ ${p}owner`,
     '╰──────────────⬣',
     '',
+    '╭─❮ 📥 *DOWNLOAD* ❯',
+    `│ ✦ ${p}tt <link>`,
+    `│ ✦ ${p}fb <link>`,
+    '╰──────────────⬣',
+    '',
     '╭─❮ 🎨 *MEDIA* ❯',
     `│ ✦ ${p}sticker`,
     `│ ✦ ${p}media`,
@@ -368,6 +374,10 @@ function menuButtons() {
         row('Runtime', 'How long the bot has been up', 'runtime'),
         row('About', 'About this bot', 'about'),
         row('Owner', 'Contact the owner', 'owner')
+      ] },
+      { title: '📥 DOWNLOAD', rows: [
+        row('TikTok', 'Use .tt <link>', 'tt'),
+        row('Facebook', 'Use .fb <link>', 'fb')
       ] },
       { title: '🎨 MEDIA', rows: [
         row('Sticker', 'Sticker help', 'sticker'),
@@ -418,20 +428,138 @@ async function sendInteractive(sock, jid, { image, body, footer, buttons }, quot
 }
 
 // Tries buttons first; if anything fails it falls back to image+caption, then plain text.
-async function sendRich(sock, jid, { caption, buttons, footer }, quoted) {
+async function sendRich(sock, jid, { caption, buttons, footer, image = MENU_IMAGE }, quoted) {
   if (USE_BUTTONS) {
     try {
-      await sendInteractive(sock, jid, { image: MENU_IMAGE, body: caption, footer, buttons }, quoted);
+      await sendInteractive(sock, jid, { image, body: caption, footer, buttons }, quoted);
       return;
     } catch (err) { console.error('Button send failed, using fallback:', err?.message || err); }
   }
   try {
-    await sock.sendMessage(jid, { image: { url: MENU_IMAGE }, caption }, { quoted });
+    await sock.sendMessage(jid, { image: { url: image }, caption }, { quoted });
   } catch (err) {
     console.error('Image send failed, using text:', err?.message || err);
     await sock.sendMessage(jid, { text: caption }, { quoted });
   }
 }
+
+/* ---------- downloader (TikTok / Facebook) ---------- */
+const YTDLP = process.env.YTDLP_PATH || (fs.existsSync(path.join(__dirname, 'bin', 'yt-dlp')) ? path.join(__dirname, 'bin', 'yt-dlp') : 'yt-dlp');
+const MAX_DL_BYTES = Number(process.env.MAX_DL_MB || 90) * 1024 * 1024;
+const TIKTOK_HOSTS = /(^|\.)tiktok\.com$/i;
+const FB_HOSTS = /(^|\.)(facebook\.com|fb\.watch|fb\.com)$/i;
+const pendingDl = new Map(); // token -> { info, platform, expires }
+
+function parseUrl(raw, platform) {
+  let u;
+  try { u = new URL(String(raw || '').trim()); } catch { return null; }
+  if (!/^https?:$/.test(u.protocol)) return null;
+  const ok = platform === 'tiktok' ? TIKTOK_HOSTS.test(u.hostname) : FB_HOSTS.test(u.hostname);
+  return ok ? u.toString() : null;
+}
+
+function runYtDlp(url) {
+  return new Promise((resolve, reject) => {
+    execFile(YTDLP, ['-J', '--no-playlist', '--no-warnings', '-f', 'best[ext=mp4]/best', '--', url],
+      { timeout: 60000, maxBuffer: 20 * 1024 * 1024 }, (err, stdout) => {
+        if (err) return reject(err);
+        try {
+          const j = JSON.parse(stdout);
+          if (!j.url) return reject(new Error('yt-dlp returned no direct url'));
+          resolve({ title: j.title || '', author: j.uploader || '', thumb: j.thumbnail || '', video: j.url, audio: null, headers: j.http_headers || {} });
+        } catch (e) { reject(e); }
+      });
+  });
+}
+
+async function tikwm(url) {
+  const res = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1`, { signal: AbortSignal.timeout(30000) });
+  const j = await res.json();
+  if (j.code !== 0 || !j.data) throw new Error(j.msg || 'tikwm failed');
+  const abs = (v) => (v ? (v.startsWith('/') ? `https://www.tikwm.com${v}` : v) : null);
+  const d = j.data;
+  return { title: d.title || '', author: d.author?.nickname || '', thumb: abs(d.cover), video: abs(d.hdplay || d.play), audio: abs(d.music), headers: {} };
+}
+
+async function resolveMedia(platform, url) {
+  if (platform === 'tiktok') {
+    try { return await tikwm(url); }
+    catch (err) { console.error('tikwm failed, trying yt-dlp:', err?.message || err); }
+  }
+  return runYtDlp(url);
+}
+
+async function fetchBuffer(url, headers = {}) {
+  const res = await fetch(url, { headers, signal: AbortSignal.timeout(120000) });
+  if (!res.ok) throw new Error(`download failed (${res.status})`);
+  const len = Number(res.headers.get('content-length') || 0);
+  if (len && len > MAX_DL_BYTES) throw new Error('TOO_BIG');
+  const buf = Buffer.from(await res.arrayBuffer());
+  if (buf.length > MAX_DL_BYTES) throw new Error('TOO_BIG');
+  return buf;
+}
+
+async function startDownload(sock, jid, msg, platform, rawUrl) {
+  const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: msg });
+  const label = platform === 'tiktok' ? 'TikTok' : 'Facebook';
+  const cmd = platform === 'tiktok' ? 'tt' : 'fb';
+  const url = parseUrl(rawUrl, platform);
+  if (!url) return reply(`❌ Send a valid ${label} link.\nExample: ${PREFIX}${cmd} <${label} link>`);
+  await reply(`⏳ Fetching ${label} video...`);
+  let info;
+  try { info = await resolveMedia(platform, url); }
+  catch (err) {
+    console.error(`${label} resolve error:`, err?.message || err);
+    return reply(`❌ Could not fetch that ${label} video. It may be private, removed, or the downloader is unavailable.`);
+  }
+  const token = crypto.randomBytes(4).toString('hex');
+  pendingDl.set(token, { info, platform, expires: Date.now() + 10 * 60 * 1000 });
+  const p = PREFIX;
+  const caption = [
+    `╭━━━〔 📥 *${label.toUpperCase()} DOWNLOADER* 〕━━━⬣`,
+    `┃ 🎬 ${(info.title || 'No title').slice(0, 120)}`,
+    info.author ? `┃ 👤 ${info.author}` : null,
+    '╰━━━━━━━━━━━━━━━━━━━━⬣',
+    '',
+    '👇 Select the file format'
+  ].filter((l) => l !== null).join('\n');
+  const buttons = [
+    qr('🎬 Video', `${p}dl video ${token}`),
+    qr('🎵 Audio', `${p}dl audio ${token}`),
+    qr('📄 Document', `${p}dl doc ${token}`)
+  ];
+  return sendRich(sock, jid, { caption, buttons, footer: `${BOT_NAME} • Link valid for 10 min`, image: info.thumb || MENU_IMAGE }, msg);
+}
+
+async function sendDownload(sock, jid, msg, kind, token) {
+  const reply = (t) => sock.sendMessage(jid, { text: t }, { quoted: msg });
+  const entry = pendingDl.get(String(token || ''));
+  if (!entry || entry.expires < Date.now()) return reply(`⌛ This download request expired. Send the link again with ${PREFIX}tt or ${PREFIX}fb.`);
+  const { info } = entry;
+  const safeName = `${BOT_NAME.replace(/\W+/g, '-')}-${String(token)}`;
+  try {
+    await reply(kind === 'audio' ? '⏳ Preparing audio...' : '⏳ Downloading...');
+    if (kind === 'audio') {
+      const src = info.audio || info.video;
+      const buf = await fetchBuffer(src, info.audio ? {} : info.headers);
+      return sock.sendMessage(jid, { audio: buf, mimetype: info.audio ? 'audio/mpeg' : 'audio/mp4', ptt: false }, { quoted: msg });
+    }
+    const buf = await fetchBuffer(info.video, info.headers);
+    if (kind === 'doc') {
+      return sock.sendMessage(jid, { document: buf, mimetype: 'video/mp4', fileName: `${safeName}.mp4`, caption: `📄 ${BOT_NAME}` }, { quoted: msg });
+    }
+    return sock.sendMessage(jid, { video: buf, mimetype: 'video/mp4', caption: `🎬 ${(info.title || '').slice(0, 200)}\n\n> ${BOT_NAME}` }, { quoted: msg });
+  } catch (err) {
+    console.error('Send download error:', err?.message || err);
+    if (err?.message === 'TOO_BIG') return reply(`❌ File is larger than ${Math.round(MAX_DL_BYTES / 1048576)} MB, so I can't send it.`);
+    return reply('❌ Download failed. Please try again.');
+  }
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of pendingDl) if (v.expires < now) pendingDl.delete(k);
+}, 60 * 1000).unref();
 
 /* ---------- command handler ---------- */
 async function handleMessage(sock, msg, sessionId) {
@@ -453,12 +581,12 @@ async function handleMessage(sock, msg, sessionId) {
     else return;
   }
 
-  const [rawCommand] = commandText.slice(PREFIX.length).trim().split(/\s+/);
+  const [rawCommand, ...args] = commandText.slice(PREFIX.length).trim().split(/\s+/);
   const command = (rawCommand || '').toLowerCase();
   if (!command) return;
 
   const now = Date.now();
-  const key = `${sessionId}:${jid}:${command}`;
+  const key = `${sessionId}:${jid}:${command}:${args[0] || ''}`;
   if (cooldowns.has(key) && now - cooldowns.get(key) < 700) return;
   cooldowns.set(key, now);
 
@@ -472,6 +600,14 @@ async function handleMessage(sock, msg, sessionId) {
     case 'alive':
     case 'bot':
       return sendRich(sock, jid, { caption: aliveCaption(name), buttons: aliveButtons(), footer }, msg);
+    case 'tt':
+    case 'tiktok':
+      return startDownload(sock, jid, msg, 'tiktok', args[0]);
+    case 'fb':
+    case 'facebook':
+      return startDownload(sock, jid, msg, 'facebook', args[0]);
+    case 'dl':
+      return sendDownload(sock, jid, msg, args[0], args[1]);
     case 'ping': {
       const started = Date.now();
       const sent = await reply('🏓 Pinging...');
