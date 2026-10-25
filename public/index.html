@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#101216">
+<title>RIO X MD • Pairing</title><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main class="wrap">
+  <header><div class="logo">RX</div><div><h1>RIO X MD</h1><p>WhatsApp MD • Pairing Portal</p></div><span class="pill">MULTI-SESSION</span></header>
+  <section class="card">
+    <h2>Connect your WhatsApp</h2>
+    <p class="muted">Use your own account only. Your session is stored separately on the bot host.</p>
+    <label for="apikey">Pairing API key</label><input id="apikey" type="password" autocomplete="off" placeholder="Enter the site owner's API key">
+    <label for="phone">Phone number with country code</label><input id="phone" inputmode="numeric" autocomplete="tel" placeholder="947XXXXXXXX">
+    <button id="connect">Generate Pair Code</button>
+    <p class="hint">Enter digits only, including country code. Do not include +, spaces or dashes.</p>
+    <div id="result" class="result" aria-live="polite">Your connection details will appear here.</div>
+  </section>
+  <footer>RIO X MD • Keep pairing codes and session files private.</footer>
+</main><script src="/script.js"></script>
+</body></html>

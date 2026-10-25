@@ -1,0 +1,19 @@
+{
+  "name": "rio-x-md",
+  "version": "1.2.0",
+  "description": "RIO X MD multi-session WhatsApp bot with menu commands and a QR/pair-code website",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "node --watch index.js",
+    "check": "node --check index.js && node --check public/script.js"
+  },
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "pino": "^9.6.0",
+    "qrcode": "^1.5.4"
+  }
+}

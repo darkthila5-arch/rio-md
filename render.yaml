@@ -1,0 +1,34 @@
+# Render Blueprint. Persistent disks need a paid plan (starter or higher).
+# Without a disk, linked WhatsApp sessions are lost on every restart/redeploy.
+services:
+  - type: web
+    name: rio-x-md
+    runtime: node
+    plan: starter
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: PAIRING_API_KEY
+        generateValue: true   # Render creates a long random key; view it in the Environment tab
+      - key: BOT_NAME
+        value: RIO X MD
+      - key: PREFIX
+        value: "."
+      - key: MENU_IMAGE
+        value: https://files.catbox.moe/jy9p51.jpg
+      - key: OWNER_NUMBER
+        sync: false
+      - key: BUTTONS
+        value: on
+      - key: MAX_SESSIONS
+        value: 20
+      - key: SESSION_DIR
+        value: /var/data/sessions
+    disk:
+      name: rio-sessions
+      mountPath: /var/data
+      sizeGB: 1
