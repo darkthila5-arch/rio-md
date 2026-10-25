@@ -39,3 +39,6 @@ Paired sessions are restored automatically from `SESSION_DIR`. Unpaired attempts
 - Render: the build command in `render.yaml` downloads yt-dlp into `bin/`. Locally, install yt-dlp (`pip install yt-dlp` or the binary) or set `YTDLP_PATH`.
 - Only public videos work. Files over `MAX_DL_MB` (default 90) are refused.
 - Download only content you have the right to save.
+
+## MongoDB session storage
+Set `MONGO_URL` (MongoDB Atlas free cluster) and WhatsApp sessions are stored in the database instead of files, so they survive redeploys and restarts, even on Render free. Without `MONGO_URL` the bot uses the `SESSION_DIR` files as before. In Atlas, allow network access from `0.0.0.0/0` (Network Access) so Render can connect.
