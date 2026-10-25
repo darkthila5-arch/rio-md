@@ -77,7 +77,7 @@ function makeLimiter(max, windowMs) {
   };
 }
 const apiLimiter = makeLimiter(90, 60 * 1000);
-const createLimiter = makeLimiter(5, 10 * 60 * 1000);
+const createLimiter = makeLimiter(10, 10 * 60 * 1000);
 
 // Pairing is public by default so anyone can link their own number. Set PAIRING_REQUIRE_KEY=true to lock it behind PAIRING_API_KEY.
 const REQUIRE_KEY = String(process.env.PAIRING_REQUIRE_KEY || '').toLowerCase() === 'true';
@@ -218,7 +218,7 @@ async function startSession(id, phone = '') {
     const config = {
       auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
       logger,
-      browser: Browsers.ubuntu(BOT_NAME),
+      browser: Browsers.ubuntu(process.env.BROWSER_NAME || 'Chrome'), // pair codes only work with a known browser name
       printQRInTerminal: false,
       markOnlineOnConnect: false,
       syncFullHistory: false
@@ -964,15 +964,16 @@ setInterval(() => { // keep the cooldown map from growing forever
 
 /* ---------- HTTP API ---------- */
 app.post('/api/session', createLimiter, authRequired, async (req, res) => {
-  const phone = String(req.body?.phone || '').replace(/\D/g, '');
-  if (phone.length < 8 || phone.length > 15) {
+  const qrOnly = req.body?.mode === 'qr';
+  const phone = qrOnly ? '' : String(req.body?.phone || '').replace(/\D/g, '');
+  if (!qrOnly && (phone.length < 8 || phone.length > 15)) {
     return res.status(400).json({ error: 'Enter a valid international phone number with country code, digits only.' });
   }
   if (sessions.size >= MAX_SESSIONS) {
     return res.status(429).json({ error: 'The server is full right now. Please try again later.' });
   }
   for (const [sid, r] of sessions) { // one session per number
-    if (r.phone !== phone) continue;
+    if (!phone || r.phone !== phone) continue;
     if (r.status === 'connected') return res.status(409).json({ error: 'This number is already linked to the bot.' });
     if (r.state?.creds?.registered) return res.status(409).json({ error: 'This number is already linked and is reconnecting. Try again in a minute.' });
     destroySession(sid); // abandoned, unfinished attempt
@@ -994,9 +995,17 @@ app.get('/api/session/:id', apiLimiter, authRequired, async (req, res) => {
   if (!record) return res.status(404).json({ error: 'Session expired or not found. Generate a new code.' });
   let qrDataUrl = null;
   if (record.qr) {
-    try { qrDataUrl = await QRCode.toDataURL(record.qr, { margin: 1, width: 260 }); } catch {}
+    try { qrDataUrl = await QRCode.toDataURL(record.qr, { margin: 1, width: 320 }); } catch {}
   }
   res.json({ id, status: record.status, phone: record.phone, pairCode: record.pairCode, qrDataUrl, error: record.error || null });
+});
+
+app.delete('/api/session/:id', apiLimiter, authRequired, (req, res) => {
+  const { id } = req.params;
+  if (!safeId(id)) return res.status(400).json({ error: 'Invalid session id.' });
+  const r = sessions.get(id);
+  if (r && r.status !== 'connected' && !r.state?.creds?.registered) destroySession(id); // never touches a linked session
+  res.json({ ok: true });
 });
 
 app.get('/health', (_req, res) => res.json({ ok: true, bot: BOT_NAME, activeSessions: sessions.size, storage: mongoCol ? 'mongodb' : 'files' }));
