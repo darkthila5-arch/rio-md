@@ -674,6 +674,9 @@ async function fetchBuffer(url, headers = {}) {
 // Optional YouTube cookies (Netscape cookies.txt content in the YTDLP_COOKIES env) for when YouTube asks "confirm you're not a bot".
 const COOKIE_FILE = path.join(os.tmpdir(), 'ytdlp-cookies.txt');
 if (process.env.YTDLP_COOKIES) { try { fs.writeFileSync(COOKIE_FILE, process.env.YTDLP_COOKIES.replace(/\\n/g, '\n'), { mode: 0o600 }); } catch {} }
+// Preferred: add cookies.txt as a Render "Secret File" (Environment -> Secret Files, filename cookies.txt). It is copied so yt-dlp can write to it.
+const SECRET_COOKIES = process.env.YTDLP_COOKIES_FILE || '/etc/secrets/cookies.txt';
+try { if (fs.existsSync(SECRET_COOKIES)) { fs.copyFileSync(SECRET_COOKIES, COOKIE_FILE); fs.chmodSync(COOKIE_FILE, 0o600); console.log('YouTube cookies loaded.'); } } catch (err) { console.error('Could not load cookies file:', err?.message || err); }
 const cookieArgs = () => (fs.existsSync(COOKIE_FILE) ? ['--cookies', COOKIE_FILE] : []);
 
 // Lets yt-dlp itself download the file (it knows the right headers/cookies for each site).
