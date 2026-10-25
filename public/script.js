@@ -179,7 +179,7 @@ function success() {
 
 function confetti() {
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  const colors = ['#25f4ee', '#fe2c55', '#ffffff', '#7c3aed'];
+  const colors = ['#25d366', '#7dffb0', '#ffffff', '#128c7e'];
   for (let i = 0; i < 40; i++) {
     const el = document.createElement('i');
     el.className = 'confetti';
