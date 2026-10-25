@@ -1,22 +1,57 @@
 <!doctype html>
 <html lang="en">
 <head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="theme-color" content="#101216">
-<title>RIO X MD • Pairing</title><link rel="stylesheet" href="/style.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#010101">
+<title>RIO X MD • Link your WhatsApp</title>
+<meta name="description" content="Link your WhatsApp to RIO X MD with a pair code. Fast, free and private.">
+<link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<div class="bg" aria-hidden="true"><span class="orb o1"></span><span class="orb o2"></span><span class="orb o3"></span><span class="grid"></span></div>
+
 <main class="wrap">
-  <header><div class="logo">RX</div><div><h1>RIO X MD</h1><p>WhatsApp MD • Pairing Portal</p></div><span class="pill">MULTI-SESSION</span></header>
-  <section class="card">
-    <h2>Connect your WhatsApp</h2>
-    <p class="muted">Use your own account only. Your session is stored separately on the bot host.</p>
-    <label for="apikey">Pairing API key</label><input id="apikey" type="password" autocomplete="off" placeholder="Enter the site owner's API key">
-    <label for="phone">Phone number with country code</label><input id="phone" inputmode="numeric" autocomplete="tel" placeholder="947XXXXXXXX">
-    <button id="connect">Generate Pair Code</button>
-    <p class="hint">Enter digits only, including country code. Do not include +, spaces or dashes.</p>
-    <div id="result" class="result" aria-live="polite">Your connection details will appear here.</div>
+  <header>
+    <div class="logo"><span>RX</span></div>
+    <div class="title">
+      <h1 class="glitch" data-text="RIO X MD">RIO X MD</h1>
+      <p>WhatsApp MD • Pairing Portal</p>
+    </div>
+    <span class="live" title="Bots currently running"><i></i><b id="online">–</b><em>online</em></span>
+  </header>
+
+  <section class="card" id="card">
+    <ol class="steps" id="steps" aria-label="Progress">
+      <li class="on"><i>1</i><span>Number</span></li>
+      <li><i>2</i><span>Code</span></li>
+      <li><i>3</i><span>Link</span></li>
+      <li><i>4</i><span>Done</span></li>
+    </ol>
+
+    <h2>Link your <span class="grad">WhatsApp</span></h2>
+    <p class="muted">Enter your own number to get a pair code. No sign-up, no password.</p>
+
+    <label for="phone">Phone number with country code</label>
+    <div class="field">
+      <span class="plus">+</span>
+      <input id="phone" inputmode="numeric" autocomplete="tel" placeholder="947XXXXXXXX" maxlength="18">
+    </div>
+    <p class="hint">Digits only, with country code. No spaces or dashes.</p>
+
+    <button id="connect" class="btn"><span class="label">Generate Pair Code</span><span class="spin" aria-hidden="true"></span></button>
+
+    <div id="result" class="result" hidden aria-live="polite"></div>
   </section>
-  <footer>RIO X MD • Keep pairing codes and session files private.</footer>
-</main><script src="/script.js"></script>
-</body></html>
+
+  <section class="how">
+    <div class="tile"><b>1</b><p>Enter your number and tap <em>Generate Pair Code</em>.</p></div>
+    <div class="tile"><b>2</b><p>On WhatsApp: <em>Linked devices → Link a device → Link with phone number</em>.</p></div>
+    <div class="tile"><b>3</b><p>Type the code. Then send <em>.menu</em> in any chat.</p></div>
+  </section>
+
+  <footer>RIO X MD • Use your own account only. Never share your pair code.</footer>
+</main>
+<script src="/script.js"></script>
+</body>
+</html>
