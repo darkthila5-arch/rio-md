@@ -79,7 +79,10 @@ function makeLimiter(max, windowMs) {
 const apiLimiter = makeLimiter(90, 60 * 1000);
 const createLimiter = makeLimiter(5, 10 * 60 * 1000);
 
+// Pairing is public by default so anyone can link their own number. Set PAIRING_REQUIRE_KEY=true to lock it behind PAIRING_API_KEY.
+const REQUIRE_KEY = String(process.env.PAIRING_REQUIRE_KEY || '').toLowerCase() === 'true';
 function authRequired(req, res, next) {
+  if (!REQUIRE_KEY) return next();
   if (!keyIsConfigured()) {
     return res.status(503).json({ error: 'Server is not configured: set a PAIRING_API_KEY of at least 12 characters.' });
   }
@@ -262,6 +265,7 @@ async function startSession(id, phone = '') {
 
       if (update.connection === 'open') {
         record.status = 'connected';
+        record.phone = String(sock.user?.id || '').split(':')[0].split('@')[0] || record.phone;
         record.qr = null;
         record.pairCode = null;
         record.starting = false;
@@ -965,7 +969,13 @@ app.post('/api/session', createLimiter, authRequired, async (req, res) => {
     return res.status(400).json({ error: 'Enter a valid international phone number with country code, digits only.' });
   }
   if (sessions.size >= MAX_SESSIONS) {
-    return res.status(429).json({ error: 'Session limit reached on this server.' });
+    return res.status(429).json({ error: 'The server is full right now. Please try again later.' });
+  }
+  for (const [sid, r] of sessions) { // one session per number
+    if (r.phone !== phone) continue;
+    if (r.status === 'connected') return res.status(409).json({ error: 'This number is already linked to the bot.' });
+    if (r.state?.creds?.registered) return res.status(409).json({ error: 'This number is already linked and is reconnecting. Try again in a minute.' });
+    destroySession(sid); // abandoned, unfinished attempt
   }
   const id = crypto.randomBytes(12).toString('hex');
   try {
@@ -993,7 +1003,7 @@ app.get('/health', (_req, res) => res.json({ ok: true, bot: BOT_NAME, activeSess
 
 const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`${BOT_NAME} pairing site listening on port ${PORT}`);
-  if (!keyIsConfigured()) console.warn('WARNING: PAIRING_API_KEY is missing/too short/placeholder — pairing is disabled until you set a real one.');
+  if (REQUIRE_KEY && !keyIsConfigured()) console.warn('WARNING: PAIRING_REQUIRE_KEY is on but PAIRING_API_KEY is missing/too short — pairing is disabled until you set a real one.');
   console.log(`Session directory: ${SESSION_ROOT}`);
   restoreSessions().catch((e) => console.error('Restore error:', e?.message || e));
 });
