@@ -47,6 +47,7 @@ app.disable('x-powered-by');
 app.use(express.json({ limit: '20kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
+let shuttingDown = false; // set on SIGTERM so the old instance never reconnects and steals the session from the new one
 const sessions = new Map(); // id -> { sock, state, qr, pairCode, status, phone, starting, removed, retries, timers }
 const cooldowns = new Map();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -111,16 +112,28 @@ const MONGO_URL = (process.env.MONGO_URL || '').trim();
 const MONGO_DB = (process.env.MONGO_DB || 'rio_x_md').trim();
 let mongoCol = null;
 
+let mongoPending = null;
 async function getMongoCol() {
   if (!MONGO_URL) return null;
   if (mongoCol) return mongoCol;
-  const client = new MongoClient(MONGO_URL, { serverSelectionTimeoutMS: 15000 });
-  await client.connect();
-  const col = client.db(MONGO_DB).collection('auth');
-  await col.createIndex({ sid: 1 });
-  mongoCol = col;
-  console.log('Auth storage: MongoDB (sessions survive redeploys).');
-  return col;
+  if (!mongoPending) {
+    mongoPending = (async () => {
+      let lastErr;
+      for (let i = 0; i < 3; i++) {
+        try {
+          const client = new MongoClient(MONGO_URL, { serverSelectionTimeoutMS: 15000 });
+          await client.connect();
+          const col = client.db(MONGO_DB).collection('auth');
+          await col.createIndex({ sid: 1 });
+          mongoCol = col;
+          console.log('Auth storage: MongoDB (sessions survive redeploys).');
+          return col;
+        } catch (err) { lastErr = err; console.error(`MongoDB connect attempt ${i + 1} failed:`, err?.message || err); await sleep(3000); }
+      }
+      throw lastErr;
+    })().finally(() => { mongoPending = null; });
+  }
+  return mongoPending;
 }
 
 async function useMongoAuthState(col, sid) {
@@ -164,9 +177,7 @@ async function useMongoAuthState(col, sid) {
 }
 
 async function getAuthState(sid) {
-  let col = null;
-  try { col = await getMongoCol(); }
-  catch (err) { console.error('MongoDB connection failed, using local files:', err?.message || err); }
+  const col = await getMongoCol(); // throws when MONGO_URL is set but unreachable: never silently fall back to files
   if (col) return useMongoAuthState(col, sid);
   return useMultiFileAuthState(sessionPath(sid));
 }
@@ -255,12 +266,14 @@ async function startSession(id, phone = '') {
         record.pairCode = null;
         record.starting = false;
         record.retries = 0;
+        record.replacedCount = 0;
         clearTimeout(record.expiryTimer);
         record.expiryTimer = null;
         console.log(`Session ${id} connected.`);
       }
 
       if (update.connection === 'close') {
+        if (shuttingDown) return;
         const statusCode = update.lastDisconnect?.error?.output?.statusCode;
         record.starting = false;
         record.sock = null;
@@ -276,6 +289,13 @@ async function startSession(id, phone = '') {
         if (statusCode === DisconnectReason.connectionReplaced) {
           record.status = 'replaced';
           record.error = 'Another device/session replaced this connection.';
+          record.replacedCount = (record.replacedCount || 0) + 1;
+          // During a redeploy the old instance briefly holds the session; retry shortly instead of staying offline.
+          if (record.replacedCount <= 5) {
+            record.reconnectTimer = setTimeout(() => {
+              if (!record.removed && !shuttingDown) startSession(id, record.phone).catch((e) => console.error('Reconnect error:', e?.message || e));
+            }, 20000);
+          }
           return;
         }
         record.status = 'disconnected';
@@ -306,11 +326,17 @@ async function startSession(id, phone = '') {
 }
 
 // Re-open every previously paired session after a restart/redeploy.
-async function restoreSessions() {
+async function restoreSessions(attempt = 0) {
   let col = null;
-  try { col = await getMongoCol(); } catch (err) { console.error('MongoDB unavailable during restore:', err?.message || err); }
+  try { col = await getMongoCol(); }
+  catch (err) {
+    console.error('MongoDB unavailable during restore:', err?.message || err);
+    if (MONGO_URL && attempt < 10) setTimeout(() => restoreSessions(attempt + 1).catch(() => {}), 20000).unref?.();
+    return;
+  }
   if (col) {
     const sids = (await col.distinct('sid')).filter(safeId);
+    console.log(`Found ${sids.length} saved session(s) in MongoDB.`);
     for (const sid of sids) {
       if (sessions.has(sid)) continue;
       if (!(await isMongoSessionRegistered(col, sid))) { await deleteSessionData(sid); continue; } // unfinished pairing
@@ -973,6 +999,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
 process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', err?.message || err));
 process.on('uncaughtException', (err) => console.error('Uncaught exception:', err?.message || err));
 function shutdown() {
+  shuttingDown = true;
   console.log('Shutting down…');
   for (const record of sessions.values()) { clearTimers(record); try { record.sock?.end(undefined); } catch {} }
   server.close(() => process.exit(0));
