@@ -549,7 +549,7 @@ async function sendRich(sock, jid, { caption, buttons, footer, image = MENU_IMAG
 }
 
 /* ---------- downloader (TikTok / Facebook) ---------- */
-const YTDLP = process.env.YTDLP_PATH || (fs.existsSync(path.join(__dirname, 'bin', 'yt-dlp')) ? path.join(__dirname, 'bin', 'yt-dlp') : 'yt-dlp');
+let YTDLP = process.env.YTDLP_PATH || (fs.existsSync(path.join(__dirname, 'bin', 'yt-dlp')) ? path.join(__dirname, 'bin', 'yt-dlp') : 'yt-dlp');
 const MAX_DL_BYTES = Number(process.env.MAX_DL_MB || 50) * 1024 * 1024;
 const TIKTOK_HOSTS = /(^|\.)tiktok\.com$/i;
 const FB_HOSTS = /(^|\.)(facebook\.com|fb\.watch|fb\.com)$/i;
@@ -563,7 +563,8 @@ function parseUrl(raw, platform) {
   return ok ? u.toString() : null;
 }
 
-function runYtDlp(url) {
+async function runYtDlp(url) {
+  await ytdlpReady;
   return new Promise((resolve, reject) => {
     execFile(YTDLP, ['-J', '--no-playlist', '--no-warnings', '-f', 'best[ext=mp4]/best', '--', url],
       { timeout: 60000, maxBuffer: 20 * 1024 * 1024 }, (err, stdout) => {
@@ -577,14 +578,49 @@ function runYtDlp(url) {
   });
 }
 
-async function tikwm(url) {
-  const res = await fetch(`https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1`, { signal: AbortSignal.timeout(30000) });
-  const j = await res.json();
+async function tikwm(url, attempt = 0) {
+  const res = await fetch('https://www.tikwm.com/api/', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded', 'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36' },
+    body: new URLSearchParams({ url, hd: '1' }),
+    signal: AbortSignal.timeout(30000)
+  });
+  const text = await res.text();
+  let j;
+  try { j = JSON.parse(text); }
+  catch {
+    if (attempt < 1) { await sleep(1500); return tikwm(url, attempt + 1); } // free API allows ~1 request/second
+    throw new Error(`tikwm gave an empty/invalid reply (HTTP ${res.status})`);
+  }
   if (j.code !== 0 || !j.data) throw new Error(j.msg || 'tikwm failed');
   const abs = (v) => (v ? (v.startsWith('/') ? `https://www.tikwm.com${v}` : v) : null);
   const d = j.data;
   return { title: d.title || '', author: d.author?.nickname || '', thumb: abs(d.cover), video: abs(d.hdplay || d.play), audio: abs(d.music), headers: {} };
 }
+
+const ytdlpWorks = (bin) => new Promise((r) => execFile(bin, ['--version'], { timeout: 20000 }, (e) => r(!e)));
+// Downloads the standalone yt-dlp binary (no Python needed) if it is not installed yet.
+async function ensureYtDlp() {
+  if (await ytdlpWorks(YTDLP)) return true;
+  if (process.platform !== 'linux') { console.error('yt-dlp is not installed. Install it or set YTDLP_PATH.'); return false; }
+  const asset = process.arch === 'arm64' ? 'yt-dlp_linux_aarch64' : 'yt-dlp_linux';
+  const target = path.join(__dirname, 'bin', 'yt-dlp');
+  try {
+    console.log('yt-dlp not found, downloading...');
+    const res = await fetch(`https://github.com/yt-dlp/yt-dlp/releases/latest/download/${asset}`, { signal: AbortSignal.timeout(180000) });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, Buffer.from(await res.arrayBuffer()), { mode: 0o755 });
+    YTDLP = target;
+    const ok = await ytdlpWorks(YTDLP);
+    console.log(ok ? 'yt-dlp installed.' : 'yt-dlp downloaded but does not run.');
+    return ok;
+  } catch (err) {
+    console.error('Could not install yt-dlp:', err?.message || err);
+    return false;
+  }
+}
+const ytdlpReady = ensureYtDlp();
 
 async function resolveMedia(platform, url) {
   if (platform === 'tiktok') {
@@ -713,10 +749,11 @@ async function handleMessage(sock, msg, sessionId) {
       return startDownload(sock, jid, msg, 'facebook', args[0]);
     case 'dlcheck': {
       const lines = ['🔍 *Downloader check*'];
+      await ytdlpReady;
       try {
         const v = await new Promise((resolve, reject) => execFile(YTDLP, ['--version'], { timeout: 15000 }, (e, out) => (e ? reject(e) : resolve(String(out).trim()))));
         lines.push(`✅ yt-dlp: ${v}`);
-      } catch (e) { lines.push(`❌ yt-dlp not found (${e?.code || e?.message}). Fix the Render Build Command.`); }
+      } catch (e) { lines.push(`❌ yt-dlp not available (${e?.code || e?.message}). Check the logs for 'Could not install yt-dlp'.`); }
       try {
         const info = await tikwm('https://www.tiktok.com/@scout2015/video/6718335390845095173');
         lines.push(info.video ? '✅ TikTok API (tikwm): working' : '⚠️ TikTok API replied without a video');
