@@ -22,7 +22,7 @@ Open `http://localhost:3000`, enter the same `PAIRING_API_KEY`, your number (dig
 Paired sessions are restored automatically from `SESSION_DIR`. Unpaired attempts expire after 5 minutes. Logged-out sessions are deleted.
 
 ## Commands
-`.menu` / `.help` (image + buttons), `.alive`, `.ping`, `.owner`, `.runtime`, `.about`, `.media` / `.sticker`, `.groupinfo`, `.grouphelp`, `.status`
+`.tt <link>` / `.fb <link>` (download), `.menu` / `.help` (image + buttons), `.alive`, `.ping`, `.owner`, `.runtime`, `.about`, `.media` / `.sticker`, `.groupinfo`, `.grouphelp`, `.status`
 (Also works if you send `menu` or `help` without the prefix.)
 
 ## Security
@@ -32,3 +32,10 @@ Paired sessions are restored automatically from `SESSION_DIR`. Unpaired attempts
 
 ## Buttons
 `.menu` and `.alive` send an image with real WhatsApp buttons (quick reply + list + owner link). If buttons fail to send, the bot automatically falls back to image + text. Set `BUTTONS=off` to disable buttons. Change the picture with `MENU_IMAGE`, and set `OWNER_NUMBER` for the Owner button.
+
+## TikTok / Facebook downloader
+`.tt <tiktok link>` or `.fb <facebook link>` shows the video preview with **Video / Audio / Document** buttons; tap one and the bot sends that format.
+- TikTok uses the tikwm API first, then yt-dlp as backup. Facebook uses yt-dlp.
+- Render: the build command in `render.yaml` downloads yt-dlp into `bin/`. Locally, install yt-dlp (`pip install yt-dlp` or the binary) or set `YTDLP_PATH`.
+- Only public videos work. Files over `MAX_DL_MB` (default 90) are refused.
+- Download only content you have the right to save.
