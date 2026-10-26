@@ -68,3 +68,6 @@ Commands: `.callstream on|off|status|unlink`, `.callstream loop on|off`, `.setca
 Deploy: this needs the **Dockerfile** (it builds the Go service and installs ffmpeg). `render.yaml` already uses `runtime: docker`. Keep the persistent disk, the link between the call service and your number is stored in `SESSION_DIR/_callbot`. Locally: `cd callbot && go mod tidy && go build -o ../bin/callbot .` (needs Go 1.24+ and ffmpeg), then `npm start`.
 
 Honest limits: meowcaller is a young reverse-engineered library. Audio calls are its strongest part; its own docs mark outgoing video as *not validated*, so video playback into a call may not show on every phone. Test with `.callstream on` and a call from another number, and send me the `[callbot]` log lines if something fails. WhatsApp may change its protocol at any time, and automated use of an account can get it restricted. Use only on your own number.
+
+## Owner menu
+`.menu` only shows the public commands. All owner and call commands are hidden from it and listed in `.momenu` (aliases `.ownermenu`, `.omenu`), which works only for the owner (the linked account or `OWNER_NUMBER`). For everybody else `.momenu` is ignored silently, and owner commands answer "owner only".
