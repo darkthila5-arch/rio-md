@@ -1,7 +1,7 @@
 # RIO X MD: Node bot + Go "callbot" (real call answering) + ffmpeg.
 # Stage 1: build the Go call service. `go mod tidy` fetches the newest whatsmeow / meowcaller.
 FROM golang:1.24-bookworm AS callbot
-ENV GOTOOLCHAIN=auto CGO_ENABLED=0
+ENV GOTOOLCHAIN=auto CGO_ENABLED=0 GOFLAGS=-mod=mod
 WORKDIR /src
 COPY callbot/ ./
 RUN go mod tidy && go build -trimpath -ldflags="-s -w" -o /out/callbot .
