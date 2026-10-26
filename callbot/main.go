@@ -1,7 +1,7 @@
 // callbot: answers real WhatsApp calls and streams a saved audio / video clip into them.
 //
 // It is a small companion service for RIO X MD. The Node bot (Baileys) cannot answer calls, so this
-// service links itself as a second WhatsApp "linked device" on the same number (whatsmeow) and uses
+// service links itself as a second WhatsApp "linked device" on the same number (hypermeow, a whatsmeow fork) and uses
 // meowcaller for the call media. The Node bot talks to it over a localhost HTTP API.
 package main
 
@@ -25,13 +25,13 @@ import (
 	"syscall"
 	"time"
 
+	whatsmeow "github.com/polymorfa/hypermeow"
+	"github.com/polymorfa/hypermeow/store"
+	"github.com/polymorfa/hypermeow/store/sqlstore"
+	"github.com/polymorfa/hypermeow/types"
+	"github.com/polymorfa/hypermeow/types/events"
+	waLog "github.com/polymorfa/hypermeow/util/log"
 	"github.com/purpshell/meowcaller"
-	"go.mau.fi/whatsmeow"
-	"go.mau.fi/whatsmeow/store"
-	"go.mau.fi/whatsmeow/store/sqlstore"
-	"go.mau.fi/whatsmeow/types"
-	"go.mau.fi/whatsmeow/types/events"
-	waLog "go.mau.fi/whatsmeow/util/log"
 	_ "modernc.org/sqlite"
 )
 
