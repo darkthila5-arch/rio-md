@@ -3,15 +3,12 @@
 services:
   - type: web
     name: rio-x-md
-    runtime: node
+    runtime: docker          # Docker build = Node bot + Go call service + ffmpeg (see Dockerfile)
+    dockerfilePath: ./Dockerfile
     plan: starter
-    buildCommand: npm install
-    startCommand: npm start
     healthCheckPath: /health
     autoDeploy: true
     envVars:
-      - key: NODE_VERSION
-        value: 20
       - key: PAIRING_API_KEY
         generateValue: true   # Render creates a long random key; view it in the Environment tab
       - key: BOT_NAME
