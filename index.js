@@ -636,6 +636,7 @@ const REACTIONS = {
   tt: '🎵', tiktok: '🎵', fb: '📘', facebook: '📘', pin: '📌', pinterest: '📌', song: '🎶', play: '🎶', yt: '🎶', ytmp3: '🎶',
   dl: '📥', ytdl: '📥', dlcheck: '🔍', media: '🎨', sticker: '🎨', groupinfo: '👥', grouphelp: '👥', status: '📊',
   mode: '⚙️', broadcast: '📢', bc: '📢', block: '⛔', unblock: '✅', join: '🔗', leave: '🚪', setbio: '✍️', setpp: '🖼️', restart: '🔄',
+  momenu: '👑', ownermenu: '👑', omenu: '👑',
   call: '📞', callsettings: '📞', callstream: '📞', realcall: '📞', callreject: '📵', anticall: '📵', autoanswer: '🤖', callanswer: '🤖', setcallmsg: '✍️',
   setcallaudio: '🎙️', setcallvideo: '🎬', callpreview: '▶️', delcallmedia: '🗑️'
 };
@@ -735,6 +736,7 @@ function menuCaption(name) {
     `│ ✦ ${p}runtime`,
     `│ ✦ ${p}about`,
     `│ ✦ ${p}owner`,
+    `│ ✦ ${p}status`,
     '╰──────────────⬣',
     '',
     '╭─❮ 📥 *DOWNLOAD* ❯',
@@ -753,6 +755,22 @@ function menuCaption(name) {
     `│ ✦ ${p}groupinfo`,
     `│ ✦ ${p}grouphelp`,
     '╰──────────────⬣',
+    '',
+    `> ${BOT_NAME} • Powered by Rio Editz`
+  ].join('\n');
+}
+
+// Owner-only menu (.momenu). Never shown in .menu.
+function ownerMenuCaption(name) {
+  const p = PREFIX;
+  const { date, time } = nowStrings();
+  return [
+    `╭━━━〔 👑 *${BOT_NAME} OWNER MENU* 👑 〕━━━⬣`,
+    `┃ 👋 Hi *${name}*, ${greeting()}`,
+    `┃ 🔰 Prefix : ${p}`,
+    `┃ ⏱️ Uptime : ${formatUptime(process.uptime())}`,
+    `┃ 📅 ${date}  🕒 ${time}`,
+    '╰━━━━━━━━━━━━━━━━━━━━⬣',
     '',
     '╭─❮ 👑 *OWNER* ❯',
     `│ ✦ ${p}status`,
@@ -778,7 +796,7 @@ function menuCaption(name) {
     `│ ✦ ${p}delcallmedia <audio/video>`,
     '╰──────────────⬣',
     '',
-    `> ${BOT_NAME} • Powered by Rio Editz`
+    `> ${BOT_NAME} • Owner only`
   ].join('\n');
 }
 
@@ -798,7 +816,8 @@ function menuButtons() {
         row('Ping', 'Check bot speed', 'ping'),
         row('Runtime', 'How long the bot has been up', 'runtime'),
         row('About', 'About this bot', 'about'),
-        row('Owner', 'Contact the owner', 'owner')
+        row('Owner', 'Contact the owner', 'owner'),
+        row('Status', 'Bot status', 'status')
       ] },
       { title: '📥 DOWNLOAD', rows: [
         row('TikTok', 'Use .tt <link>', 'tt'),
@@ -813,9 +832,20 @@ function menuButtons() {
       { title: '👥 GROUP', rows: [
         row('Group Info', 'Current group details', 'groupinfo'),
         row('Group Help', 'Group commands', 'grouphelp')
-      ] },
+      ] }
+    ])
+  ];
+  if (OWNER_NUMBER) buttons.push(urlBtn('👑 Chat Owner', `https://wa.me/${OWNER_NUMBER}`));
+  return buttons;
+}
+function ownerMenuButtons() {
+  const p = PREFIX;
+  const row = (title, description, id) => ({ header: '', title, description, id: `${p}${id}` });
+  return [
+    qr('📞 Call Settings', `${p}call`),
+    qr('📜 Main Menu', `${p}menu`),
+    listBtn('👑 Owner Menu', [
       { title: '👑 OWNER', rows: [
-        row('Status', 'Bot status', 'status'),
         row('Mode', 'public / private', 'mode'),
         row('Broadcast', 'Send text to all groups', 'broadcast'),
         row('Block', 'Block a user', 'block'),
@@ -835,8 +865,6 @@ function menuButtons() {
       ] }
     ])
   ];
-  if (OWNER_NUMBER) buttons.push(urlBtn('👑 Chat Owner', `https://wa.me/${OWNER_NUMBER}`));
-  return buttons;
 }
 function aliveButtons() {
   const p = PREFIX;
@@ -1272,6 +1300,8 @@ async function handleMessage(sock, msg, sessionId) {
 
   if (getMode(sessionId) === 'private' && !isOwner) return; // private mode: only the owner can use the bot
 
+  if (/^(momenu|ownermenu|omenu)$/.test(command) && !isOwner) return; // the owner menu does not exist for other people
+
   const known = command in REACTIONS;
   react(sock, jid, msg.key, known ? REACTIONS[command] : '❔'); // emoji reaction on the command message
 
@@ -1297,6 +1327,10 @@ async function handleMessage(sock, msg, sessionId) {
     case 'help':
     case 'list':
       return sendRich(sock, jid, { caption: menuCaption(name), buttons: menuButtons(), footer }, msg);
+    case 'momenu':
+    case 'ownermenu':
+    case 'omenu':
+      return sendRich(sock, jid, { caption: ownerMenuCaption(name), buttons: ownerMenuButtons(), footer: `${BOT_NAME} • Owner only` }, msg);
     case 'alive':
     case 'bot':
       return sendRich(sock, jid, { caption: aliveCaption(name), buttons: aliveButtons(), footer }, msg);
