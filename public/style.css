@@ -1,168 +1,193 @@
-:root{
-  color-scheme:dark;
-  --paper:#050505;--card:#0e0e0e;--tab-bg:#1a1a1a;--tint:#14231b;
-  --line:#2a2a2a;--ink:#fafafa;--muted:#a6a6a6;
-  --accent:#25d366;--accent-2:#7dffb0;--on-ink:#03140a;
-  --error:#ff8a80;--ease:cubic-bezier(.22,1,.36,1)
+const $ = (id) => document.getElementById(id);
+const SESSION_MS = 5 * 60 * 1000; // matches the server's unpaired-session timeout
+let pollTimer = null, tickTimer = null, failures = 0, startedAt = 0, mode = 'code', currentId = null, lastSig = '';
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+async function api(url, options = {}) {
+  const response = await fetch(url, { ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+  return data;
 }
-*{box-sizing:border-box}
-html{-webkit-text-size-adjust:100%;scroll-behavior:smooth}
-body{
-  margin:0;min-height:100vh;min-height:100dvh;display:flex;flex-direction:column;overflow-x:hidden;
-  background:radial-gradient(900px 440px at 50% -120px,color-mix(in srgb,var(--accent) 22%,transparent),transparent 70%) no-repeat,var(--paper);
-  color:var(--ink);font-family:"Bricolage Grotesque",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;line-height:1.5
+
+function setStep(n) {
+  [...$('steps').children].forEach((li, i) => {
+    li.classList.toggle('done', i + 1 < n || (n === 4 && i + 1 === 4));
+    li.classList.toggle('on', i + 1 === n && n !== 4);
+  });
 }
-main{flex:1;position:relative;z-index:1}
-.wrap{width:100%;max-width:640px;margin:0 auto;padding-left:max(18px,env(safe-area-inset-left));padding-right:max(18px,env(safe-area-inset-right))}
-button{font:inherit;color:inherit;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
-:focus-visible{outline:3px solid var(--accent-2);outline-offset:3px}
+function show(html) { const r = $('result'); r.hidden = false; r.innerHTML = html; }
+function btnLabel() { return mode === 'qr' ? 'Generate QR Code' : 'Generate Pair Code'; }
+function setLoading(on) { const b = $('connect'); b.disabled = on; b.classList.toggle('loading', on); b.querySelector('.label').textContent = on ? 'Working…' : btnLabel(); }
+function stopAll() { clearInterval(pollTimer); clearInterval(tickTimer); }
 
-/* aurora background */
-.aurora{position:fixed;inset:0;z-index:0;overflow:hidden;pointer-events:none}
-.aurora i{position:absolute;width:70vmax;height:70vmax;border-radius:50%;background:radial-gradient(circle,color-mix(in srgb,var(--accent) 20%,transparent),transparent 62%);will-change:transform}
-.aurora i:nth-child(1){top:-38vmax;left:-22vmax;animation:drift1 26s ease-in-out infinite alternate}
-.aurora i:nth-child(2){top:30vh;right:-40vmax;opacity:.6;animation:drift2 32s ease-in-out infinite alternate}
-.aurora i:nth-child(3){bottom:-45vmax;left:5vmax;opacity:.5;animation:drift1 38s ease-in-out infinite alternate-reverse}
-@keyframes drift1{to{transform:translate3d(14vmax,10vmax,0) scale(1.15)}}
-@keyframes drift2{to{transform:translate3d(-16vmax,-8vmax,0) scale(.9)}}
-@keyframes rise{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
-@keyframes fade{from{opacity:0}to{opacity:1}}
-@keyframes spin{to{transform:rotate(360deg)}}
-@keyframes shake{20%,60%{transform:translateX(-5px)}40%,80%{transform:translateX(5px)}}
-@keyframes ping{0%{transform:scale(1);opacity:.5}80%,100%{transform:scale(3);opacity:0}}
-@keyframes float{0%,100%{transform:translateY(0) rotate(-2deg)}50%{transform:translateY(-10px) rotate(2deg)}}
-@keyframes ringout{0%{transform:scale(.55);opacity:.6}100%{transform:scale(1.5);opacity:0}}
-@keyframes pop{to{opacity:1;transform:none}}
-@keyframes draw{to{stroke-dashoffset:0}}
-@keyframes scan{0%,100%{top:8%}50%{top:90%}}
-@keyframes sheen{0%{left:-60%}28%,100%{left:140%}}
-@keyframes gradmove{to{background-position:200% center}}
-
-/* header */
-.top{position:sticky;top:0;z-index:30;padding:max(12px,env(safe-area-inset-top)) 0 12px;background:color-mix(in srgb,var(--paper) 72%,transparent);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);border-bottom:1px solid color-mix(in srgb,var(--line) 70%,transparent)}
-.top .wrap{display:flex;align-items:center;justify-content:space-between;gap:12px}
-.brand{display:inline-flex;align-items:center;gap:12px;text-decoration:none;color:var(--ink);animation:fade .8s var(--ease) both}
-.mark{width:32px;height:39px;object-fit:contain;flex:none;filter:drop-shadow(0 2px 10px color-mix(in srgb,var(--accent) 60%,transparent))}
-.wordmark{display:flex;flex-direction:column;gap:3px;line-height:1;min-width:0}
-.w-top{font-weight:800;font-size:1.15rem;letter-spacing:.1em}
-.w-top .x{margin:0 .3em;color:var(--accent)}
-.w-bot{font-weight:600;font-size:.58rem;letter-spacing:.16em;color:var(--muted);white-space:nowrap}
-.live{display:inline-flex;align-items:center;gap:9px;padding:6px 13px;font-size:.88rem;font-weight:600;background:var(--card);border:2px solid var(--line);border-radius:999px;white-space:nowrap;animation:fade .8s var(--ease) .15s both}
-.live small{font-size:inherit;font-weight:400;color:var(--muted)}
-.live b{font-variant-numeric:tabular-nums}
-.dot{position:relative;width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none;display:inline-block}
-.dot::after{content:"";position:absolute;inset:0;border-radius:50%;background:var(--accent);animation:ping 1.8s var(--ease) infinite}
-
-/* hero */
-.hero{text-align:center;padding:30px 0 22px}
-.hero-mark{position:relative;width:120px;height:136px;margin:0 auto 12px;display:grid;place-items:center}
-.hero-ghost{position:relative;z-index:2;width:76px;height:auto;filter:drop-shadow(0 10px 28px color-mix(in srgb,var(--accent) 65%,transparent));animation:float 5s ease-in-out infinite;pointer-events:none;user-select:none}
-.ring{position:absolute;left:50%;top:50%;width:112px;height:112px;margin:-56px 0 0 -56px;border:2px solid var(--accent);border-radius:50%;opacity:0;animation:ringout 3.6s var(--ease) infinite}
-.ring.r2{animation-delay:1.8s}
-.eyebrow{display:inline-flex;align-items:center;gap:9px;margin:0 0 16px;padding:6px 14px;font-size:.8rem;font-weight:600;color:var(--muted);background:var(--card);border:1px solid var(--line);border-radius:999px}
-h1{margin:0 0 14px;font-size:clamp(2.1rem,8vw,3.3rem);font-weight:800;line-height:1.05;letter-spacing:-.025em;text-wrap:balance}
-.grad{background:linear-gradient(90deg,var(--accent),var(--accent-2),#fff,var(--accent));background-size:200% auto;-webkit-background-clip:text;background-clip:text;color:transparent;animation:gradmove 6s linear infinite}
-.lede{margin:0 auto;color:var(--muted);font-size:clamp(.98rem,2.6vw,1.1rem);max-width:46ch}
-
-/* card */
-.card{position:relative;border-radius:26px;padding:22px;background:linear-gradient(180deg,color-mix(in srgb,var(--card) 92%,transparent),var(--card));border:2px solid var(--line);box-shadow:0 20px 60px color-mix(in srgb,var(--accent) 10%,transparent);animation:rise .7s var(--ease) .1s both}
-.card::before{content:"";position:absolute;top:0;left:12%;right:12%;height:2px;background:linear-gradient(90deg,transparent,var(--accent),transparent);border-radius:2px;opacity:.8}
-
-/* steps */
-.steps{list-style:none;display:flex;justify-content:space-between;gap:6px;margin:0 0 20px;padding:0;position:relative}
-.steps::before{content:"";position:absolute;left:12%;right:12%;top:15px;height:2px;background:var(--line)}
-.steps li{position:relative;flex:1;display:flex;flex-direction:column;align-items:center;gap:6px;font-size:.72rem;font-weight:600;color:var(--muted);letter-spacing:.04em;transition:color .3s}
-.steps i{width:31px;height:31px;border-radius:50%;display:grid;place-items:center;font-style:normal;font-weight:800;font-size:.85rem;background:var(--card);border:2px solid var(--line);transition:all .35s var(--ease)}
-.steps li.on{color:var(--ink)}
-.steps li.on i{border-color:var(--accent);color:var(--accent);box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 18%,transparent)}
-.steps li.done i{background:var(--accent);border-color:var(--accent);color:var(--on-ink);font-size:0}
-.steps li.done i::before{content:"✓";font-size:.95rem}
-
-/* tabs */
-.tabs{position:relative;display:grid;grid-template-columns:1fr 1fr;padding:4px;margin:0 0 18px;background:var(--tab-bg);border-radius:16px}
-.slider{position:absolute;top:4px;bottom:4px;left:4px;width:calc(50% - 4px);border-radius:12px;background:var(--accent);box-shadow:0 2px 14px color-mix(in srgb,var(--accent) 45%,transparent);transition:transform .4s var(--ease)}
-.tabs[data-mode="qr"] .slider{transform:translateX(100%)}
-.tab{position:relative;z-index:1;display:flex;align-items:center;justify-content:center;gap:8px;min-height:46px;padding:8px;border:0;background:none;border-radius:12px;font-weight:600;font-size:.95rem;color:var(--muted);cursor:pointer;transition:color .25s}
-.tab svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.9;stroke-linecap:round;stroke-linejoin:round}
-.tab.on{color:var(--on-ink)}
-
-/* form */
-label{display:block;font-weight:600;font-size:.92rem;margin:0 0 8px}
-.field{display:flex;align-items:center;min-height:58px;background:var(--paper);border:2px solid var(--line);border-radius:16px;transition:border-color .25s var(--ease),box-shadow .25s var(--ease)}
-.field:focus-within{border-color:var(--accent);box-shadow:0 0 0 4px color-mix(in srgb,var(--accent) 24%,transparent)}
-.field.bad{border-color:var(--error);animation:shake .4s var(--ease)}
-.plus{padding:0 4px 0 18px;color:var(--accent);font-weight:800;font-size:1.2rem}
-input{flex:1;min-width:0;background:transparent;border:0;outline:0;color:var(--ink);padding:15px 16px 15px 4px;font:inherit;font-size:1.15rem;letter-spacing:.06em}
-input::placeholder{color:var(--muted);opacity:.55}
-.hint{color:var(--muted);font-size:.82rem;margin:8px 2px 0}
-#qrHint{margin:0 2px}
-#qrHint[hidden],#phoneBox[hidden]{display:none}
-
-.btn{position:relative;overflow:hidden;width:100%;min-height:58px;margin-top:18px;border:0;border-radius:16px;padding:14px 24px;font-size:1.05rem;font-weight:700;color:var(--on-ink);cursor:pointer;background:linear-gradient(180deg,var(--accent),color-mix(in srgb,var(--accent) 82%,#000));display:flex;align-items:center;justify-content:center;gap:10px;transition:transform .2s var(--ease),box-shadow .3s var(--ease),opacity .2s}
-.btn::after{content:"";position:absolute;top:0;left:-60%;width:36%;height:100%;background:linear-gradient(100deg,transparent,#ffffff59,transparent);transform:skewX(-20deg);animation:sheen 4.2s infinite}
-.btn:hover{box-shadow:0 10px 28px color-mix(in srgb,var(--accent) 45%,transparent)}
-.btn:active{transform:scale(.98)}
-.btn:disabled{opacity:.75;cursor:progress}
-.spin{display:none;width:18px;height:18px;border-radius:50%;border:2.5px solid color-mix(in srgb,currentColor 30%,transparent);border-top-color:currentColor;animation:spin .7s linear infinite}
-.btn.loading .spin{display:block}
-
-/* result */
-.result{margin-top:20px;padding:18px;background:var(--paper);border:2px solid var(--line);border-radius:20px;overflow-wrap:anywhere;animation:rise .5s var(--ease) both}
-.result[hidden]{display:none}
-.status{display:flex;align-items:center;gap:10px;margin:0 0 10px;color:var(--accent);font-weight:600;font-size:.92rem}
-.msg{color:#cfcfcf;font-size:.92rem;margin:6px 0 12px}
-.code{display:flex;justify-content:center;align-items:center;gap:6px;margin:16px 0;flex-wrap:wrap}
-.code .d{width:40px;height:54px;display:grid;place-items:center;font-size:1.65rem;font-weight:800;border-radius:12px;background:var(--card);border:2px solid color-mix(in srgb,var(--accent) 55%,var(--line));color:#fff;opacity:0;transform:translateY(14px) scale(.9);animation:pop .5s var(--ease) forwards}
-.code .sep{color:var(--muted);font-weight:800;padding:0 2px}
-.copy{display:block;width:100%;max-width:280px;margin:0 auto;min-height:44px;border:2px solid var(--line);background:var(--tab-bg);color:var(--ink);border-radius:14px;padding:10px 18px;font-weight:600;font-size:.92rem;cursor:pointer;transition:border-color .2s,color .2s,transform .2s var(--ease)}
-.copy:hover{border-color:var(--accent);color:var(--accent)}
-.copy:active{transform:scale(.97)}
-.timer{text-align:center;color:var(--muted);font-size:.78rem;margin:14px 0 0;font-variant-numeric:tabular-nums}
-.bar{height:3px;border-radius:3px;background:var(--line);margin-top:8px;overflow:hidden}
-.bar span{display:block;height:100%;width:100%;background:linear-gradient(90deg,var(--accent),var(--accent-2));transform-origin:left;transition:transform 1s linear}
-.qrbox{position:relative;width:min(272px,100%);margin:14px auto;background:#fff;border-radius:18px;padding:12px;overflow:hidden;box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 55%,transparent),0 0 40px color-mix(in srgb,var(--accent) 30%,transparent)}
-.qrbox img{display:block;width:100%;height:auto;aspect-ratio:1;transition:opacity .3s}
-.qrbox img.swap{opacity:.25}
-.qrbox .scan{position:absolute;left:0;right:0;height:3px;background:linear-gradient(90deg,transparent,var(--accent),transparent);box-shadow:0 0 14px var(--accent);animation:scan 2.4s ease-in-out infinite}
-.qrload{display:grid;place-items:center;aspect-ratio:1;color:#777;font-size:.85rem}
-.error{color:var(--error);font-size:.92rem;font-weight:600;margin:0;animation:shake .4s var(--ease)}
-.error::before{content:"⚠ "}
-
-/* success */
-.ok{text-align:center;padding:6px 0}
-.check{width:80px;height:80px;margin:0 auto 12px;display:block}
-.check circle{fill:color-mix(in srgb,var(--accent) 14%,transparent);stroke:var(--accent);stroke-width:3;stroke-dasharray:170;stroke-dashoffset:170;animation:draw .7s .1s forwards}
-.check path{fill:none;stroke:#fff;stroke-width:4;stroke-linecap:round;stroke-linejoin:round;stroke-dasharray:50;stroke-dashoffset:50;animation:draw .5s .7s forwards}
-.ok h3{margin:0 0 6px;font-size:1.4rem;font-weight:800}
-.ok p{margin:4px 0;color:#cfcfcf;font-size:.95rem}
-.ok code{background:var(--tab-bg);border:1px solid var(--line);padding:2px 9px;border-radius:8px;color:var(--accent-2)}
-.confetti{position:fixed;top:-12px;width:8px;height:14px;border-radius:2px;pointer-events:none;z-index:99;animation:fall linear forwards}
-@keyframes fall{to{transform:translateY(105vh) rotate(720deg);opacity:.9}}
-
-/* perks + how */
-.perks{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:18px;animation:rise .7s var(--ease) .2s both}
-.perks div{display:flex;flex-direction:column;align-items:center;text-align:center;gap:2px;padding:14px 8px;background:var(--card);border:2px solid var(--line);border-radius:18px;transition:border-color .25s,transform .25s var(--ease)}
-.perks svg{width:24px;height:24px;margin-bottom:4px;fill:none;stroke:var(--accent);stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
-.perks b{font-size:.95rem}
-.perks span{font-size:.76rem;color:var(--muted)}
-.how{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:10px;animation:rise .7s var(--ease) .3s both}
-.tile{padding:14px;background:var(--card);border:2px solid var(--line);border-radius:18px;transition:border-color .25s,transform .25s var(--ease)}
-.tile b{display:grid;place-items:center;width:26px;height:26px;border-radius:50%;font-size:.8rem;background:var(--accent);color:var(--on-ink);margin-bottom:8px}
-.tile p{margin:0;color:var(--muted);font-size:.82rem;line-height:1.45}
-.tile em{font-style:normal;color:var(--ink);font-weight:600}
-@media(hover:hover){.perks div:hover,.tile:hover{border-color:var(--accent);transform:translateY(-3px)}}
-
-footer{position:relative;z-index:1;text-align:center;color:var(--muted);font-size:.86rem;padding:28px 0 max(26px,env(safe-area-inset-bottom))}
-footer small{display:block;margin-top:4px;font-size:.76rem;opacity:.8}
-
-@media(max-width:560px){
-  .how{grid-template-columns:1fr}
-  .card{padding:18px;border-radius:22px}
-  .live small{display:none}
-  .w-bot{font-size:.52rem}
-  .code .d{width:34px;height:48px;font-size:1.4rem}
-  .perks span{display:none}
+/* ---------- mode tabs ---------- */
+function setMode(m) {
+  mode = m;
+  $('tabs').dataset.mode = m;
+  document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('on', t.dataset.mode === m));
+  $('phoneBox').hidden = m === 'qr';
+  $('qrHint').hidden = m !== 'qr';
+  if (!$('connect').disabled) $('connect').querySelector('.label').textContent = btnLabel();
 }
-@media(prefers-reduced-motion:reduce){
-  *,*::before,*::after{animation-duration:.001s!important;animation-iteration-count:1!important;transition-duration:.001s!important}
+document.querySelectorAll('.tab').forEach((t) => t.addEventListener('click', () => { if (!$('connect').disabled) setMode(t.dataset.mode); }));
+
+/* ---------- live bot counter ---------- */
+let shown = 0;
+function countTo(target) {
+  const el = $('online'); const from = shown; const t0 = performance.now();
+  (function step(t) {
+    const p = Math.min(1, (t - t0) / 700);
+    shown = Math.round(from + (target - from) * (1 - Math.pow(1 - p, 3)));
+    el.textContent = shown;
+    if (p < 1) requestAnimationFrame(step);
+  })(t0);
+}
+async function loadOnline() {
+  try { const d = await (await fetch('/health')).json(); countTo(Number(d.activeSessions) || 0); } catch { /* keep last value */ }
+}
+loadOnline(); setInterval(loadOnline, 30000);
+
+/* ---------- connect ---------- */
+$('phone').addEventListener('input', (e) => { e.target.value = e.target.value.replace(/\D/g, ''); $('phone').parentElement.classList.remove('bad'); });
+$('phone').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('connect').click(); });
+$('connect').addEventListener('click', generate);
+
+async function generate() {
+  stopAll(); failures = 0; lastSig = '';
+  let phone = '';
+  if (mode === 'code') {
+    phone = $('phone').value.replace(/\D/g, '');
+    if (phone.length < 8 || phone.length > 15) {
+      const f = $('phone').parentElement; f.classList.remove('bad'); void f.offsetWidth; f.classList.add('bad');
+      show('<p class="error">Enter a valid number with country code, e.g. 947XXXXXXXX.</p>');
+      return;
+    }
+  }
+  setLoading(true); setStep(2);
+  show('<p class="status"><span class="dot"></span>Starting a secure session…</p>');
+  if (currentId) { fetch(`/api/session/${encodeURIComponent(currentId)}`, { method: 'DELETE' }).catch(() => {}); currentId = null; } // free the old attempt
+  try {
+    const session = await api('/api/session', { method: 'POST', body: JSON.stringify({ phone, mode }) });
+    currentId = session.id;
+    startedAt = Date.now();
+    pollTimer = setInterval(() => poll(session.id), 2000);
+    tickTimer = setInterval(tick, 1000);
+    await poll(session.id);
+  } catch (e) { fail(e.message); }
+}
+
+function fail(message) {
+  stopAll(); setLoading(false); setStep(1);
+  show(`<p class="error">${esc(message)}</p>`);
+}
+
+function tick() {
+  const left = Math.max(0, SESSION_MS - (Date.now() - startedAt));
+  const t = document.getElementById('timer'), bar = document.getElementById('barfill');
+  if (t) t.textContent = `Session expires in ${Math.floor(left / 60000)}:${String(Math.floor(left / 1000) % 60).padStart(2, '0')}`;
+  if (bar) bar.style.transform = `scaleX(${left / SESSION_MS})`;
+  if (left === 0) fail('This session expired. Tap the button to start again.');
+}
+
+const STATUS_TEXT = {
+  starting: 'Starting a secure session…',
+  waiting_for_scan: 'Preparing…',
+  waiting_for_pair: 'Waiting for you to link on WhatsApp…',
+  disconnected: 'Reconnecting…'
+};
+
+function codeTiles(code) {
+  let i = 0;
+  return String(code).split('').map((ch) => ch === '-'
+    ? '<span class="sep">-</span>'
+    : `<span class="d" style="animation-delay:${(i++) * 60}ms">${esc(ch)}</span>`).join('');
+}
+
+async function poll(id) {
+  try {
+    const d = await api(`/api/session/${encodeURIComponent(id)}`);
+    failures = 0;
+
+    if (d.status === 'connected') { stopAll(); currentId = null; setLoading(false); success(); return; }
+    if (d.error) { fail(d.error); return; }
+    if (['logged_out', 'pair_error', 'replaced', 'error'].includes(d.status)) { fail('Something went wrong. Please try again.'); return; }
+
+    const status = `<p class="status"><span class="dot"></span>${esc(STATUS_TEXT[d.status] || d.status)}</p>`;
+    const foot = '<p class="timer" id="timer"></p><div class="bar"><span id="barfill"></span></div>';
+
+    if (mode === 'qr') {
+      if (d.qrDataUrl) setStep(3);
+      if (lastSig !== 'qr') {
+        lastSig = 'qr';
+        show(`${status}<p class="msg">Open <b>WhatsApp → Linked devices → Link a device</b> and scan this QR code:</p>
+          <div class="qrbox"><div class="qrload" id="qrload">Loading QR…</div><img id="qrimg" alt="WhatsApp pairing QR code" hidden><span class="scan"></span></div>
+          <p class="hint" style="text-align:center">The QR refreshes by itself. Keep this page open.</p>${foot}`);
+      }
+      const img = document.getElementById('qrimg');
+      if (img && d.qrDataUrl && img.dataset.src !== d.qrDataUrl) { // the QR rotates every ~20s: swap the image, never rebuild the page
+        img.classList.add('swap');
+        img.src = d.qrDataUrl; img.dataset.src = d.qrDataUrl; img.hidden = false;
+        const l = document.getElementById('qrload'); if (l) l.remove();
+        setTimeout(() => img.classList.remove('swap'), 250);
+      }
+      tick();
+      return;
+    }
+
+    if (d.pairCode) setStep(3);
+    const sig = `code|${d.status}|${d.pairCode || ''}`;
+    if (sig !== lastSig) { // rebuild only on change so the digit animation does not replay
+      lastSig = sig;
+      let html = status;
+      if (d.pairCode) {
+        html += `<p class="msg">Open <b>WhatsApp → Linked devices → Link a device → Link with phone number</b>, then type this code:</p>
+          <div class="code">${codeTiles(d.pairCode)}</div>
+          <button class="copy" id="copy" type="button">Copy code</button>
+          <button class="copy" id="toqr" type="button" style="margin-top:10px">Code not working? Use QR instead</button>`;
+      }
+      show(html + foot);
+      const c = document.getElementById('copy'); if (c) c.onclick = () => copyCode(d.pairCode);
+      const q = document.getElementById('toqr'); if (q) q.onclick = () => { setMode('qr'); generate(); };
+    }
+    tick();
+  } catch (e) {
+    failures += 1;
+    const definite = /expired|not found|Invalid|Too many|full|already/i.test(e.message);
+    if (definite || failures >= 5) fail(e.message);
+  }
+}
+
+async function copyCode(code) {
+  const btn = document.getElementById('copy');
+  try { await navigator.clipboard.writeText(String(code).replace(/-/g, '')); btn.textContent = 'Copied ✓'; }
+  catch { btn.textContent = 'Select the code and copy it'; }
+  setTimeout(() => { if (btn) btn.textContent = 'Copy code'; }, 1800);
+}
+
+function success() {
+  setStep(4); lastSig = '';
+  show(`<div class="ok">
+    <svg class="check" viewBox="0 0 80 80"><circle cx="40" cy="40" r="27"/><path d="M28 41l9 9 17-19"/></svg>
+    <h3>Connected successfully!</h3>
+    <p>Your WhatsApp is linked to <b>RIO X MD</b>.</p>
+    <p>Open any chat and send <code>.menu</code> or <code>.alive</code>.</p>
+  </div>`);
+  confetti(); loadOnline();
+}
+
+function confetti() {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const colors = ['#25d366', '#7dffb0', '#ffffff', '#128c7e'];
+  for (let i = 0; i < 40; i++) {
+    const el = document.createElement('i');
+    el.className = 'confetti';
+    el.style.left = Math.random() * 100 + 'vw';
+    el.style.background = colors[i % colors.length];
+    el.style.animationDuration = 1.8 + Math.random() * 1.8 + 's';
+    el.style.animationDelay = Math.random() * 0.5 + 's';
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 4500);
+  }
 }
