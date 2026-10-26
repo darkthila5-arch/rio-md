@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { MongoClient } from 'mongodb';
 import { fileURLToPath } from 'node:url';
 
@@ -114,6 +114,7 @@ function destroySession(id, { deleteFiles = true } = {}) {
 const MONGO_URL = (process.env.MONGO_URL || '').trim();
 const MONGO_DB = (process.env.MONGO_DB || 'rio_x_md').trim();
 let mongoCol = null;
+let mongoDb = null;
 
 let mongoPending = null;
 async function getMongoCol() {
@@ -126,7 +127,8 @@ async function getMongoCol() {
         try {
           const client = new MongoClient(MONGO_URL, { serverSelectionTimeoutMS: 15000 });
           await client.connect();
-          const col = client.db(MONGO_DB).collection('auth');
+          mongoDb = client.db(MONGO_DB);
+          const col = mongoDb.collection('auth');
           await col.createIndex({ sid: 1 });
           mongoCol = col;
           console.log('Auth storage: MongoDB (sessions survive redeploys).');
@@ -187,7 +189,17 @@ async function getAuthState(sid) {
 
 async function deleteSessionData(sid) {
   try { fs.rmSync(sessionPath(sid), { recursive: true, force: true }); } catch {}
-  try { const col = await getMongoCol(); if (col) await col.deleteMany({ sid }); } catch (err) { console.error('Mongo delete error:', err?.message || err); }
+  for (const kind of ['audio', 'video']) { try { fs.rmSync(path.join(SESSION_ROOT, '_callmedia', `${sid}.${kind}`), { force: true }); } catch {} }
+  delete settings[sid];
+  try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings)); } catch {}
+  try {
+    const col = await getMongoCol();
+    if (col) {
+      await col.deleteMany({ sid });
+      await mongoDb.collection('settings').deleteOne({ _id: sid });
+      await mongoDb.collection('callmedia').deleteMany({ sid });
+    }
+  } catch (err) { console.error('Mongo delete error:', err?.message || err); }
 }
 
 async function isMongoSessionRegistered(col, sid) {
@@ -274,6 +286,7 @@ async function startSession(id, phone = '') {
         clearTimeout(record.expiryTimer);
         record.expiryTimer = null;
         console.log(`Session ${id} connected.`);
+        if (callbotAvailable && getSetting(id, 'callStream', false)) syncCallbot(id, sock).catch(() => {});
       }
 
       if (update.connection === 'close') {
@@ -311,6 +324,13 @@ async function startSession(id, phone = '') {
       }
     });
 
+    sock.ev.on('call', async (calls) => {
+      for (const c of calls) {
+        try { await handleCall(sock, c, id); }
+        catch (err) { console.error('Call handler error:', err?.message || err); }
+      }
+    });
+
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
       for (const msg of messages) {
@@ -339,6 +359,7 @@ async function restoreSessions(attempt = 0) {
     return;
   }
   if (col) {
+    await loadMongoSettings();
     const sids = (await col.distinct('sid')).filter(safeId);
     console.log(`Found ${sids.length} saved session(s) in MongoDB.`);
     for (const sid of sids) {
@@ -385,11 +406,184 @@ const jidNum = (j) => String(j || '').split('@')[0].split(':')[0];
 const SETTINGS_FILE = path.join(SESSION_ROOT, '_settings.json');
 let settings = {};
 try { settings = JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8')) || {}; } catch { settings = {}; }
-const getMode = (sid) => settings[sid]?.mode || DEFAULT_MODE;
-function setMode(sid, mode) {
-  settings[sid] = { ...(settings[sid] || {}), mode };
+const getSetting = (sid, key, def) => settings[sid]?.[key] ?? def;
+function setSetting(sid, key, value) {
+  settings[sid] = { ...(settings[sid] || {}), [key]: value };
   try { fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings)); } catch (err) { console.error('Could not save settings:', err?.message || err); }
+  if (MONGO_URL) { // also keep a copy in MongoDB so it survives redeploys
+    getMongoCol().then(() => mongoDb?.collection('settings').updateOne({ _id: sid }, { $set: { data: settings[sid] } }, { upsert: true }))
+      .catch((err) => console.error('Mongo settings save error:', err?.message || err));
+  }
 }
+const getMode = (sid) => getSetting(sid, 'mode', DEFAULT_MODE);
+const setMode = (sid, mode) => setSetting(sid, 'mode', mode);
+async function loadMongoSettings() {
+  try {
+    if (!mongoDb) return;
+    for await (const d of mongoDb.collection('settings').find({})) settings[d._id] = { ...(settings[d._id] || {}), ...(d.data || {}) };
+  } catch (err) { console.error('Mongo settings load error:', err?.message || err); }
+}
+
+/* ---------- call handling: reject calls, or reject + auto-reply with a saved audio / video ---------- */
+// NOTE: WhatsApp has no public protocol for answering a call and streaming media into it, so "auto answer"
+// rejects the ringing call and immediately sends the saved voice note / video to the caller instead.
+const CALL_DIR = path.join(SESSION_ROOT, '_callmedia');
+const MAX_CALL_MEDIA = 15 * 1024 * 1024;
+const DEFAULT_CALL_MSG = '📵 Sorry, I can\'t take calls right now. Please send a message.';
+const seenCalls = new Map(); // call id -> time, so one call is never handled twice
+
+async function saveCallMedia(sid, kind, buf, meta) {
+  fs.mkdirSync(CALL_DIR, { recursive: true });
+  fs.writeFileSync(path.join(CALL_DIR, `${sid}.${kind}`), buf);
+  setSetting(sid, `call_${kind}`, meta);
+  if (MONGO_URL) {
+    try { await getMongoCol(); await mongoDb.collection('callmedia').updateOne({ _id: `${sid}:${kind}` }, { $set: { sid, kind, data: buf } }, { upsert: true }); }
+    catch (err) { console.error('Mongo call media save error:', err?.message || err); }
+  }
+}
+async function loadCallMedia(sid, kind) {
+  const meta = getSetting(sid, `call_${kind}`, null);
+  if (!meta) return null;
+  const file = path.join(CALL_DIR, `${sid}.${kind}`);
+  try { return { ...meta, buf: fs.readFileSync(file) }; } catch { /* file lost (redeploy): try MongoDB */ }
+  if (MONGO_URL) {
+    try {
+      await getMongoCol();
+      const doc = await mongoDb.collection('callmedia').findOne({ _id: `${sid}:${kind}` });
+      if (doc?.data) {
+        const buf = Buffer.from(doc.data.buffer.subarray(0, doc.data.position ?? doc.data.buffer.length));
+        try { fs.mkdirSync(CALL_DIR, { recursive: true }); fs.writeFileSync(file, buf); } catch {}
+        return { ...meta, buf };
+      }
+    } catch (err) { console.error('Mongo call media load error:', err?.message || err); }
+  }
+  return null;
+}
+async function deleteCallMedia(sid, kind) {
+  try { fs.rmSync(path.join(CALL_DIR, `${sid}.${kind}`), { force: true }); } catch {}
+  setSetting(sid, `call_${kind}`, null);
+  if (MONGO_URL) { try { await getMongoCol(); await mongoDb.collection('callmedia').deleteOne({ _id: `${sid}:${kind}` }); } catch {} }
+}
+async function sendCallMedia(sock, jid, media, quoted) {
+  if (media.kind === 'video') return sock.sendMessage(jid, { video: media.buf, mimetype: media.mimetype || 'video/mp4', caption: media.caption || '' }, { quoted });
+  return sock.sendMessage(jid, { audio: media.buf, mimetype: media.mimetype || 'audio/ogg; codecs=opus', ptt: media.ptt !== false }, { quoted });
+}
+
+/* ---------- real call answering: Go sidecar "callbot" (whatsmeow + meowcaller) ---------- */
+// The sidecar links itself as a second device on the same number, answers the call and streams the saved audio / video into it.
+const CALLBOT_BIN = process.env.CALLBOT_BIN || path.join(__dirname, 'bin', 'callbot');
+const CALLBOT_PORT = Number(process.env.CALLBOT_PORT || 8099);
+const CALLBOT_SECRET = crypto.randomBytes(24).toString('hex'); // new on every start, only this process and the sidecar know it
+const CALLBOT_DIR = process.env.CALLBOT_DIR || path.join(SESSION_ROOT, '_callbot');
+let callbotAvailable = false;
+let callbotProc = null;
+let callbotRestarts = 0;
+
+function startCallbot() {
+  if (!fs.existsSync(CALLBOT_BIN)) {
+    console.log('Real call streaming: callbot binary not found, feature disabled (deploy with the Dockerfile to enable it).');
+    return;
+  }
+  callbotAvailable = true;
+  const startedAt = Date.now();
+  const child = spawn(CALLBOT_BIN, [], {
+    env: { PATH: process.env.PATH, HOME: process.env.HOME || os.tmpdir(), TZ: TIMEZONE, CALLBOT_SECRET, CALLBOT_PORT: String(CALLBOT_PORT), CALLBOT_DIR },
+    stdio: ['ignore', 'pipe', 'pipe']
+  });
+  callbotProc = child;
+  const relay = (stream) => stream.on('data', (d) => String(d).split('\n').filter(Boolean).forEach((l) => console.log(`[callbot] ${l}`)));
+  relay(child.stdout); relay(child.stderr);
+  child.on('error', (err) => console.error('callbot failed to start:', err?.message || err));
+  child.on('exit', (code, signal) => {
+    callbotProc = null;
+    if (shuttingDown) return;
+    callbotRestarts = Date.now() - startedAt > 60000 ? 0 : callbotRestarts + 1;
+    console.error(`callbot exited (${signal || code}); restarting...`);
+    setTimeout(startCallbot, Math.min(30000, 2000 * (callbotRestarts + 1))).unref?.();
+  });
+}
+
+async function callbotApi(method, apiPath, { json, body, timeout = 15000 } = {}) {
+  if (!callbotAvailable) throw new Error('The call service is not installed on this server.');
+  const res = await fetch(`http://127.0.0.1:${CALLBOT_PORT}${apiPath}`, {
+    method,
+    headers: { Authorization: `Bearer ${CALLBOT_SECRET}`, ...(json ? { 'content-type': 'application/json' } : {}) },
+    body: json ? JSON.stringify(json) : body,
+    signal: AbortSignal.timeout(timeout)
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `call service error (HTTP ${res.status})`);
+  return data;
+}
+
+// Pushes the on/off state, owner skip list and saved clips of one session to the sidecar.
+async function syncCallbot(sid, sock) {
+  if (!callbotAvailable) return;
+  try {
+    const skip = [OWNER_NUMBER, jidNum(sock?.user?.id)].filter(Boolean);
+    await callbotApi('POST', `/sessions/${sid}/config`, { json: { enabled: !!getSetting(sid, 'callStream', false), loop: !!getSetting(sid, 'callLoop', false), hangup: true, skip } });
+    const st = await callbotApi('GET', `/sessions/${sid}`);
+    for (const kind of ['audio', 'video']) {
+      const has = kind === 'audio' ? st.hasAudio : st.hasVideo;
+      const media = await loadCallMedia(sid, kind);
+      if (media && !has) await callbotApi('PUT', `/sessions/${sid}/media/${kind}`, { body: media.buf, timeout: 180000 });
+      if (!media && has) await callbotApi('DELETE', `/sessions/${sid}/media/${kind}`);
+    }
+  } catch (err) { console.error('callbot sync error:', err?.message || err); }
+}
+
+// After the pair code was shown: wait (up to ~5 min) until the user has linked it, then confirm in the chat.
+function watchCallbotLink(sid, sock, jid) {
+  let tries = 0;
+  const timer = setInterval(async () => {
+    tries += 1;
+    try {
+      const st = await callbotApi('GET', `/sessions/${sid}`, { timeout: 5000 });
+      if (st.linked && st.connected) {
+        clearInterval(timer);
+        await syncCallbot(sid, sock);
+        await say(sock, jid, '✅ *Call service linked!* Real call answering is ON.\nCalls now get answered and your saved audio / video is played. Check with ' + PREFIX + 'call');
+      } else if (!st.exists || tries >= 64) clearInterval(timer);
+    } catch { if (tries >= 64) clearInterval(timer); }
+  }, 5000);
+  timer.unref?.();
+}
+
+async function handleCall(sock, call, sid) {
+  if (!call || call.status !== 'offer' || call.isGroup) return;
+  if (callbotAvailable && getSetting(sid, 'callStream', false)) { // the sidecar answers this call
+    try {
+      const st = await callbotApi('GET', `/sessions/${sid}`, { timeout: 1500 });
+      if (st.linked && st.connected && st.enabled) return;
+    } catch { /* sidecar not reachable: fall back to reject / message below */ }
+  }
+  const rejectOn = getSetting(sid, 'callReject', false);
+  const answerOn = getSetting(sid, 'autoAnswer', false);
+  if (!rejectOn && !answerOn) return;
+  if (seenCalls.has(call.id)) return;
+  seenCalls.set(call.id, Date.now());
+  for (const [k, t] of seenCalls) if (Date.now() - t > 10 * 60 * 1000) seenCalls.delete(k);
+
+  const callerNum = jidNum(call.from);
+  if (callerNum === jidNum(sock.user?.id) || (OWNER_NUMBER && callerNum === OWNER_NUMBER)) return; // never block the owner
+
+  try { await sock.rejectCall(call.id, call.from); }
+  catch (err) { console.error('Reject call error:', err?.message || err); }
+
+  const to = call.chatId && !String(call.chatId).endsWith('@g.us') ? call.chatId : call.from;
+  if (answerOn) {
+    // video call -> prefer the saved video, voice call -> prefer the saved audio; fall back to the other one
+    const order = call.isVideo ? ['video', 'audio'] : ['audio', 'video'];
+    for (const kind of order) {
+      const media = await loadCallMedia(sid, kind);
+      if (!media) continue;
+      try { await sendCallMedia(sock, to, { ...media, kind }); return; }
+      catch (err) { console.error('Call auto-reply media error:', err?.message || err); }
+    }
+  }
+  if (rejectOn) { try { await say(sock, to, getSetting(sid, 'callMsg', DEFAULT_CALL_MSG)); } catch {} }
+}
+const parseToggle = (v) => (/^(on|enable|enabled|true|yes|1)$/i.test(v || '') ? true : /^(off|disable|disabled|false|no|0)$/i.test(v || '') ? false : null);
 
 /* ---------- bot DP card (the "web og image" style preview on every reply) ---------- */
 const dpCache = new WeakMap(); // sock -> { buf, at }
@@ -441,7 +635,9 @@ const REACTIONS = {
   menu: '📜', help: '📜', list: '📜', alive: '💚', bot: '🤖', ping: '🏓', runtime: '⏱️', about: 'ℹ️', owner: '👑',
   tt: '🎵', tiktok: '🎵', fb: '📘', facebook: '📘', pin: '📌', pinterest: '📌', song: '🎶', play: '🎶', yt: '🎶', ytmp3: '🎶',
   dl: '📥', ytdl: '📥', dlcheck: '🔍', media: '🎨', sticker: '🎨', groupinfo: '👥', grouphelp: '👥', status: '📊',
-  mode: '⚙️', broadcast: '📢', bc: '📢', block: '⛔', unblock: '✅', join: '🔗', leave: '🚪', setbio: '✍️', setpp: '🖼️', restart: '🔄'
+  mode: '⚙️', broadcast: '📢', bc: '📢', block: '⛔', unblock: '✅', join: '🔗', leave: '🚪', setbio: '✍️', setpp: '🖼️', restart: '🔄',
+  call: '📞', callsettings: '📞', callstream: '📞', realcall: '📞', callreject: '📵', anticall: '📵', autoanswer: '🤖', callanswer: '🤖', setcallmsg: '✍️',
+  setcallaudio: '🎙️', setcallvideo: '🎬', callpreview: '▶️', delcallmedia: '🗑️'
 };
 async function react(sock, jid, key, emoji) {
   try { await sock.sendMessage(jid, { react: { text: emoji, key } }); }
@@ -570,6 +766,18 @@ function menuCaption(name) {
     `│ ✦ ${p}restart`,
     '╰──────────────⬣',
     '',
+    '╭─❮ 📞 *CALL* ❯',
+    `│ ✦ ${p}call (settings)`,
+    `│ ✦ ${p}callstream <on/off>`,
+    `│ ✦ ${p}callreject <on/off>`,
+    `│ ✦ ${p}autoanswer <on/off>`,
+    `│ ✦ ${p}setcallaudio (reply)`,
+    `│ ✦ ${p}setcallvideo (reply)`,
+    `│ ✦ ${p}setcallmsg <text>`,
+    `│ ✦ ${p}callpreview`,
+    `│ ✦ ${p}delcallmedia <audio/video>`,
+    '╰──────────────⬣',
+    '',
     `> ${BOT_NAME} • Powered by Rio Editz`
   ].join('\n');
 }
@@ -617,6 +825,13 @@ function menuButtons() {
         row('Set Bio', 'Change bot bio', 'setbio'),
         row('Set DP', 'Reply to an image', 'setpp'),
         row('Restart', 'Restart the bot', 'restart')
+      ] },
+      { title: '📞 CALL', rows: [
+        row('Call Settings', 'Show call settings', 'call'),
+        row('Real Call Answer', 'Answer calls + play audio/video', 'callstream'),
+        row('Call Reject', 'Reject calls on/off', 'callreject'),
+        row('Auto Answer', 'Reply to calls with audio/video', 'autoanswer'),
+        row('Call Preview', 'Send the saved audio/video', 'callpreview')
       ] }
     ])
   ];
@@ -1052,7 +1267,8 @@ async function handleMessage(sock, msg, sessionId) {
   const senderNum = jidNum(msg.key.fromMe ? sock.user?.id : (msg.key.participant || jid));
   const isOwner = !!msg.key.fromMe || senderNum === jidNum(sock.user?.id) || (!!OWNER_NUMBER && senderNum === OWNER_NUMBER);
   const isAdmin = !!OWNER_NUMBER && senderNum === OWNER_NUMBER;
-  const OWNER_ONLY = new Set(['mode', 'broadcast', 'bc', 'block', 'unblock', 'join', 'leave', 'setbio', 'setpp', 'restart']);
+  const OWNER_ONLY = new Set(['mode', 'broadcast', 'bc', 'block', 'unblock', 'join', 'leave', 'setbio', 'setpp', 'restart',
+    'callstream', 'realcall', 'call', 'callsettings', 'callreject', 'anticall', 'autoanswer', 'callanswer', 'setcallmsg', 'setcallaudio', 'setcallvideo', 'callpreview', 'delcallmedia']);
 
   if (getMode(sessionId) === 'private' && !isOwner) return; // private mode: only the owner can use the bot
 
@@ -1195,6 +1411,142 @@ async function handleMessage(sock, msg, sessionId) {
         return reply('✅ Profile picture updated. New replies will show it.');
       } catch (err) { console.error('setpp error:', err?.message || err); return reply('❌ Could not update the profile picture.'); }
     }
+    /* ----- call commands ----- */
+    case 'call':
+    case 'callsettings': {
+      const onoff = (v) => (v ? '✅ ON' : '❌ OFF');
+      const [a, v] = await Promise.all([loadCallMedia(sessionId, 'audio'), loadCallMedia(sessionId, 'video')]);
+      return reply([
+        '╭━━━〔 📞 *CALL SETTINGS* 〕━━━⬣',
+        `┃ 📵 Call reject   : ${onoff(getSetting(sessionId, 'callReject', false))}`,
+        `┃ 🤖 Auto answer   : ${onoff(getSetting(sessionId, 'autoAnswer', false))}`,
+        `┃ 🎙️ Saved audio   : ${a ? '✅ set' : '— not set'}`,
+        `┃ 🎬 Saved video   : ${v ? '✅ set' : '— not set'}`,
+        '╰━━━━━━━━━━━━━━━━━━━━⬣',
+        '',
+        `${PREFIX}callreject on/off — reject incoming calls (sends the call message)`,
+        `${PREFIX}autoanswer on/off — reject the call, then send the saved audio / video to the caller (voice call → audio, video call → video)`,
+        `${PREFIX}setcallaudio — reply to a voice note / audio`,
+        `${PREFIX}setcallvideo — reply to a video`,
+        `${PREFIX}setcallmsg <text> — message sent when a call is rejected`,
+        `${PREFIX}callpreview — send the saved audio / video here`,
+        `${PREFIX}delcallmedia audio|video — remove a saved file`,
+        '',
+        '_Note: WhatsApp does not allow bots to pick up a call and stream into it, so "auto answer" replies with the saved audio / video as a message right after rejecting the call._'
+      ].join('\n'));
+    }
+    case 'callreject':
+    case 'anticall':
+    case 'autoanswer':
+    case 'callanswer': {
+      const key = command === 'callreject' || command === 'anticall' ? 'callReject' : 'autoAnswer';
+      const label = key === 'callReject' ? 'Call reject' : 'Auto call answer';
+      const v = parseToggle(args[0]);
+      if (v === null) return reply(`${label} is *${getSetting(sessionId, key, false) ? 'ON' : 'OFF'}*.\nUse ${PREFIX}${command} on  or  ${PREFIX}${command} off`);
+      setSetting(sessionId, key, v);
+      let note = '';
+      if (key === 'autoAnswer' && v) {
+        const [a, vid] = await Promise.all([loadCallMedia(sessionId, 'audio'), loadCallMedia(sessionId, 'video')]);
+        if (!a && !vid) note = `\n⚠️ No audio/video saved yet. Reply to one with ${PREFIX}setcallaudio or ${PREFIX}setcallvideo.`;
+      }
+      return reply(`✅ ${label}: *${v ? 'ON' : 'OFF'}*${note}`);
+    }
+    case 'callstream':
+    case 'realcall': {
+      if (!callbotAvailable) return reply('❌ Real call answering is not installed on this server.\nIt needs the Docker deploy with the Go "callbot" service (see README → Real call answering). Until then use ' + PREFIX + 'autoanswer (reject + send the clip as a message).');
+      const sub = (args[0] || '').toLowerCase();
+      let st;
+      try { st = await callbotApi('GET', `/sessions/${sessionId}`); }
+      catch (err) { return reply(`❌ The call service is not answering yet (${err?.message || err}). Try again in a minute.`); }
+      const on = !!getSetting(sessionId, 'callStream', false);
+
+      if (!sub || sub === 'status') {
+        const [a, v] = await Promise.all([loadCallMedia(sessionId, 'audio'), loadCallMedia(sessionId, 'video')]);
+        return reply([
+          '╭━━━〔 📞 *REAL CALL ANSWER* 〕━━━⬣',
+          `┃ 🔛 Answer calls  : ${on ? '✅ ON' : '❌ OFF'}`,
+          `┃ 🔗 Call service  : ${st.linked ? (st.connected ? '✅ linked' : '⚠️ linked, reconnecting') : '❌ not linked'}`,
+          `┃ 🔁 Loop clip     : ${getSetting(sessionId, 'callLoop', false) ? 'ON' : 'OFF'}`,
+          `┃ 🎙️ Audio clip    : ${a ? '✅ set' : '— not set'}`,
+          `┃ 🎬 Video clip    : ${v ? '✅ set' : '— not set'}`,
+          '╰━━━━━━━━━━━━━━━━━━━━⬣',
+          '',
+          `${PREFIX}callstream on / off`,
+          `${PREFIX}callstream loop on / off`,
+          `${PREFIX}callstream unlink — remove the linked call device`,
+          `${PREFIX}setcallaudio / ${PREFIX}setcallvideo — choose what is played (voice call → audio, video call → video)`
+        ].join('\n'));
+      }
+      if (sub === 'off') { setSetting(sessionId, 'callStream', false); await syncCallbot(sessionId, sock); return reply('✅ Real call answering: *OFF*'); }
+      if (sub === 'loop') {
+        const lv = parseToggle(args[1]);
+        if (lv === null) return reply(`Use ${PREFIX}callstream loop on  or  ${PREFIX}callstream loop off`);
+        setSetting(sessionId, 'callLoop', lv); await syncCallbot(sessionId, sock);
+        return reply(`✅ Loop clip: *${lv ? 'ON' : 'OFF'}* (${lv ? 'plays until the caller hangs up' : 'hangs up when the clip ends'})`);
+      }
+      if (sub === 'unlink') {
+        setSetting(sessionId, 'callStream', false);
+        try { await callbotApi('DELETE', `/sessions/${sessionId}`); } catch (err) { return reply(`❌ ${err?.message || err}`); }
+        return reply('✅ Call device unlinked and real call answering turned OFF.');
+      }
+      if (sub !== 'on') return reply(`Use ${PREFIX}callstream on / off / loop / unlink`);
+
+      setSetting(sessionId, 'callStream', true);
+      if (st.linked) {
+        await syncCallbot(sessionId, sock);
+        const [a, v] = await Promise.all([loadCallMedia(sessionId, 'audio'), loadCallMedia(sessionId, 'video')]);
+        return reply(`✅ Real call answering: *ON*${!a && !v ? `\n⚠️ No clip saved. Reply to a voice note with ${PREFIX}setcallaudio or to a video with ${PREFIX}setcallvideo.` : ''}`);
+      }
+      if (!st.ffmpeg) await reply('⚠️ ffmpeg is missing on the server, saving clips will fail.');
+      try {
+        const phone = jidNum(sock.user?.id);
+        const { code } = await callbotApi('POST', `/sessions/${sessionId}/pair`, { json: { phone }, timeout: 60000 });
+        watchCallbotLink(sessionId, sock, jid);
+        return reply(`🔗 *Link the call service (one time)*\n\n1. Open WhatsApp on your phone\n2. *Linked devices → Link a device*\n3. Tap *Link with phone number instead*\n4. Enter this code:\n\n*${code}*\n\nThe code works for 5 minutes. I will message you here when it is linked.`);
+      } catch (err) { console.error('callbot pair error:', err?.message || err); return reply(`❌ Could not start linking: ${err?.message || err}`); }
+    }
+    case 'setcallmsg': {
+      const t = args.join(' ').trim();
+      if (!t) return reply(`Current call message:\n${getSetting(sessionId, 'callMsg', DEFAULT_CALL_MSG)}\n\nChange it: ${PREFIX}setcallmsg <text>  (or ${PREFIX}setcallmsg reset)`);
+      setSetting(sessionId, 'callMsg', /^reset$/i.test(t) ? null : t.slice(0, 500));
+      return reply('✅ Call message updated.');
+    }
+    case 'setcallaudio':
+    case 'setcallvideo': {
+      const kind = command === 'setcallaudio' ? 'audio' : 'video';
+      const ctx = unwrapMessage(msg.message).extendedTextMessage?.contextInfo;
+      const quoted = ctx?.quotedMessage ? unwrapMessage(ctx.quotedMessage) : null;
+      const part = kind === 'audio' ? quoted?.audioMessage : quoted?.videoMessage;
+      if (!part) return reply(`Reply to a ${kind === 'audio' ? 'voice note / audio' : 'video'} with ${PREFIX}${command} to save it for calls.`);
+      if (Number(part.fileLength || 0) > MAX_CALL_MEDIA) return reply(`❌ That file is bigger than ${Math.round(MAX_CALL_MEDIA / 1048576)} MB.`);
+      try {
+        const target = { key: { remoteJid: jid, id: ctx.stanzaId, participant: ctx.participant }, message: quoted };
+        const buf = await downloadMediaMessage(target, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+        if (buf.length > MAX_CALL_MEDIA) return reply(`❌ That file is bigger than ${Math.round(MAX_CALL_MEDIA / 1048576)} MB.`);
+        await saveCallMedia(sessionId, kind, buf, { mimetype: part.mimetype, ptt: !!part.ptt, caption: part.caption || '' });
+        let streamNote = '';
+        if (callbotAvailable) {
+          try { await callbotApi('PUT', `/sessions/${sessionId}/media/${kind}`, { body: buf, timeout: 180000 }); streamNote = `\n📞 Ready for real calls too (${PREFIX}callstream on).`; }
+          catch (err) { streamNote = `\n⚠️ The call service could not convert it: ${err?.message || err}`; }
+        }
+        return reply(`✅ Call ${kind} saved (${(buf.length / 1048576).toFixed(1)} MB).\nTurn it on with ${PREFIX}autoanswer on${streamNote}`);
+      } catch (err) { console.error('setcall media error:', err?.message || err); return reply('❌ Could not save that file. Try forwarding it again and reply to the new one.'); }
+    }
+    case 'callpreview': {
+      let sent = 0;
+      for (const kind of ['audio', 'video']) {
+        const media = await loadCallMedia(sessionId, kind);
+        if (media) { await sendCallMedia(sock, jid, { ...media, kind }, msg); sent++; }
+      }
+      return sent ? undefined : reply(`Nothing saved yet. Use ${PREFIX}setcallaudio / ${PREFIX}setcallvideo.`);
+    }
+    case 'delcallmedia': {
+      const kind = (args[0] || '').toLowerCase();
+      if (kind !== 'audio' && kind !== 'video') return reply(`Usage: ${PREFIX}delcallmedia audio  or  ${PREFIX}delcallmedia video`);
+      await deleteCallMedia(sessionId, kind);
+      if (callbotAvailable) await callbotApi('DELETE', `/sessions/${sessionId}/media/${kind}`).catch(() => {});
+      return reply(`🗑️ Saved call ${kind} removed.`);
+    }
     case 'restart': {
       if (!isAdmin) return reply('🚫 Restart works only for the main OWNER_NUMBER, because it restarts every linked session.');
       await reply('🔄 Restarting...');
@@ -1274,6 +1626,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`${BOT_NAME} pairing site listening on port ${PORT}`);
   if (REQUIRE_KEY && !keyIsConfigured()) console.warn('WARNING: PAIRING_REQUIRE_KEY is on but PAIRING_API_KEY is missing/too short — pairing is disabled until you set a real one.');
   console.log(`Session directory: ${SESSION_ROOT}`);
+  startCallbot();
   restoreSessions().catch((e) => console.error('Restore error:', e?.message || e));
 });
 
@@ -1284,6 +1637,7 @@ function shutdown() {
   shuttingDown = true;
   console.log('Shutting down…');
   for (const record of sessions.values()) { clearTimers(record); try { record.sock?.end(undefined); } catch {} }
+  try { callbotProc?.kill('SIGTERM'); } catch {}
   server.close(() => process.exit(0));
   setTimeout(() => process.exit(0), 5000).unref();
 }
