@@ -53,3 +53,18 @@ Every command message gets an emoji reaction (🏓 for ping, 🎵 for tt, 📌 f
 Work for the linked account itself or the number in `OWNER_NUMBER`:
 `.mode public|private` (private = only the owner can use the bot), `.broadcast <text>` (all groups, 2 s apart), `.block` / `.unblock` (number, reply or @mention), `.join <group link>`, `.leave`, `.setbio <text>`, `.setpp` (reply to an image), `.restart` (only the main `OWNER_NUMBER`, restarts every session).
 `.owner` sends the owner contact card (uses the linked number when `OWNER_NUMBER` is empty). The mode is saved in `SESSION_DIR/_settings.json`.
+
+## Call commands (owner only)
+`.call` shows the call settings. `.callreject on|off` rejects incoming calls and sends the call message (`.setcallmsg <text>` to change it). `.autoanswer on|off` rejects the ringing call and sends your saved audio (voice call) or video (video call) to the caller. Save them by replying to a voice note / video with `.setcallaudio` / `.setcallvideo` (max 15 MB), check with `.callpreview`, remove with `.delcallmedia audio|video`.
+WhatsApp has no public way for a bot to pick up a call and stream media into it, so "auto answer" works as reject + instant audio/video reply. The owner's own number and `OWNER_NUMBER` are never rejected, group calls are ignored. With `MONGO_URL` set, the settings and saved media survive redeploys; without it they are stored under `SESSION_DIR`.
+
+## Real call answering (audio / video streamed into the call)
+`.callstream on` makes the bot **pick up** incoming WhatsApp calls and play your saved clip into the call: voice call → the clip set with `.setcallaudio`, video call → the clip set with `.setcallvideo` (picture + its own sound). After the clip the bot hangs up (`.callstream loop on` repeats it until the caller hangs up).
+
+How it works: Baileys cannot answer calls, so a small Go service in `callbot/` (whatsmeow + [meowcaller](https://github.com/purpshell/meowcaller)) is started by the bot. The first time you run `.callstream on` the bot sends an 8 character code: open WhatsApp → *Linked devices → Link a device → Link with phone number instead* and type it. This links the call service as a second device on the same number (WhatsApp allows up to 4). From then on incoming calls reach both; the Node bot stays out of the way and the call service answers. The owner's own number and `OWNER_NUMBER` are never answered.
+
+Commands: `.callstream on|off|status|unlink`, `.callstream loop on|off`, `.setcallaudio`, `.setcallvideo`, `.callpreview`, `.delcallmedia audio|video`. Clips are converted by ffmpeg (audio → 16 kHz mono, video → H.264 480 px wide 15 fps, max 3 min). If the call service is not installed or not linked, `.callreject` / `.autoanswer` still work as before (reject + message / saved clip).
+
+Deploy: this needs the **Dockerfile** (it builds the Go service and installs ffmpeg). `render.yaml` already uses `runtime: docker`. Keep the persistent disk, the link between the call service and your number is stored in `SESSION_DIR/_callbot`. Locally: `cd callbot && go mod tidy && go build -o ../bin/callbot .` (needs Go 1.24+ and ffmpeg), then `npm start`.
+
+Honest limits: meowcaller is a young reverse-engineered library. Audio calls are its strongest part; its own docs mark outgoing video as *not validated*, so video playback into a call may not show on every phone. Test with `.callstream on` and a call from another number, and send me the `[callbot]` log lines if something fails. WhatsApp may change its protocol at any time, and automated use of an account can get it restricted. Use only on your own number.
