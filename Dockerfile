@@ -9,7 +9,7 @@ RUN go mod tidy && go build -trimpath -ldflags="-s -w" -o /out/callbot .
 # Stage 2: the bot itself.
 FROM node:20-bookworm-slim
 RUN apt-get update \
- && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates git \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY package*.json ./
