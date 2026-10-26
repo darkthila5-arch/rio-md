@@ -3,7 +3,7 @@ import express from 'express';
 import makeWASocket, {
   useMultiFileAuthState, DisconnectReason, Browsers, fetchLatestBaileysVersion,
   proto, generateWAMessageFromContent, prepareWAMessageMedia, isJidGroup,
-  BufferJSON, initAuthCreds, makeCacheableSignalKeyStore, downloadMediaMessage
+  BufferJSON, initAuthCreds, makeCacheableSignalKeyStore, downloadMediaMessage, jidNormalizedUser
 } from '@whiskeysockets/baileys';
 import pino from 'pino';
 import QRCode from 'qrcode';
@@ -334,6 +334,11 @@ async function startSession(id, phone = '') {
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
       if (type !== 'notify') return;
       for (const msg of messages) {
+        if (msg.key?.remoteJid === 'status@broadcast') { // statuses: auto view / react / save
+          handleStatus(sock, msg, id).catch((err) => console.error('Status handler error:', err?.message || err));
+          continue;
+        }
+        handleViewOnce(sock, msg, id).catch((err) => console.error('View-once handler error:', err?.message || err));
         try { await handleMessage(sock, msg, id); }
         catch (err) { console.error('Message handler error:', err?.message || err); }
       }
@@ -585,6 +590,111 @@ async function handleCall(sock, call, sid) {
 }
 const parseToggle = (v) => (/^(on|enable|enabled|true|yes|1)$/i.test(v || '') ? true : /^(off|disable|disabled|false|no|0)$/i.test(v || '') ? false : null);
 
+/* ---------- status tools (auto view / react / save) and view-once recovery ---------- */
+const DEFAULT_STATUS_EMOJIS = ['❤️', '🔥', '😍', '👏', '💯', '🥰'];
+const STATUS_TOGGLES = {
+  statusseen: ['statusSeen', 'Auto status view'], autoseen: ['statusSeen', 'Auto status view'],
+  statusreact: ['statusReact', 'Auto status react'], autoreact: ['statusReact', 'Auto status react'],
+  statussave: ['statusSave', 'Auto status save'], autosave: ['statusSave', 'Auto status save'],
+  viewonce: ['viewOnce', 'View-once recovery'], antiviewonce: ['viewOnce', 'View-once recovery']
+};
+const MAX_SAVE_BYTES = 64 * 1024 * 1024;
+const handledIds = new Map(); // message id -> time, so one message is never processed twice
+function firstTime(id) {
+  const now = Date.now();
+  if (handledIds.has(id)) return false;
+  handledIds.set(id, now);
+  if (handledIds.size > 2000) for (const [k, t] of handledIds) if (now - t > 30 * 60 * 1000) handledIds.delete(k);
+  return true;
+}
+function extractEmojis(text) {
+  const found = String(text || '').match(/(?:\p{Regional_Indicator}{2})|(?:[#*0-9]️?⃣)|(?:\p{Extended_Pictographic}(?:️|\p{Emoji_Modifier})?(?:‍\p{Extended_Pictographic}(?:️|\p{Emoji_Modifier})?)*)/gu);
+  return [...new Set(found || [])].slice(0, 20);
+}
+
+// Finds image / video / audio inside any wrapper (ephemeral, view-once ...). `viewOnce` tells if it was a view-once message.
+function findMedia(message) {
+  let m = message || {}, viewOnce = false;
+  for (let i = 0; i < 6; i++) {
+    const vo = m.viewOnceMessage?.message || m.viewOnceMessageV2?.message || m.viewOnceMessageV2Extension?.message;
+    const inner = vo || m.ephemeralMessage?.message || m.documentWithCaptionMessage?.message || m.editedMessage?.message;
+    if (!inner) break;
+    if (vo) viewOnce = true;
+    m = inner;
+  }
+  for (const kind of ['image', 'video', 'audio']) {
+    const part = m[`${kind}Message`];
+    if (part) return { kind, part, viewOnce: viewOnce || !!part.viewOnce };
+  }
+  return { kind: null, part: null, viewOnce, text: m.conversation || m.extendedTextMessage?.text || '' };
+}
+
+async function downloadPart(sock, target, part) {
+  if (Number(part?.fileLength || 0) > MAX_SAVE_BYTES) throw new Error('TOO_BIG');
+  const buf = await downloadMediaMessage(target, 'buffer', {}, { logger, reuploadRequest: sock.updateMediaMessage });
+  if (buf.length > MAX_SAVE_BYTES) throw new Error('TOO_BIG');
+  return buf;
+}
+async function sendMedia(sock, to, kind, part, buf, caption) {
+  if (kind === 'image') return sock.sendMessage(to, { image: buf, caption });
+  if (kind === 'video') return sock.sendMessage(to, { video: buf, mimetype: part.mimetype || 'video/mp4', caption });
+  await sock.sendMessage(to, { audio: buf, mimetype: part.mimetype || 'audio/ogg; codecs=opus', ptt: !!part.ptt });
+  if (caption) await sock.sendMessage(to, { text: caption });
+}
+
+async function handleStatus(sock, msg, sid) {
+  if (!msg.message || msg.key.fromMe) return;
+  const seen = getSetting(sid, 'statusSeen', false), react = getSetting(sid, 'statusReact', false), save = getSetting(sid, 'statusSave', false);
+  if (!seen && !react && !save) return;
+  const poster = msg.key.participant;
+  const raw = msg.message;
+  if (!poster || raw.protocolMessage || raw.reactionMessage || raw.senderKeyDistributionMessage && Object.keys(raw).length === 1) return;
+  if (!firstTime(`st:${msg.key.id}`)) return;
+  const ts = Number(msg.messageTimestamp || 0);
+  const age = ts ? Date.now() / 1000 - ts : 0;
+  if (age > 24 * 3600) return;
+  const me = jidNormalizedUser(sock.user?.id);
+
+  if (seen || react) {
+    try { await sock.readMessages([msg.key]); }
+    catch (err) { console.error('Status view error:', err?.message || err); }
+  }
+  if (react && age < 30 * 60) { // only fresh statuses, a random pause keeps it human-like
+    const list = getSetting(sid, 'statusEmojis', null);
+    const pool = Array.isArray(list) && list.length ? list : DEFAULT_STATUS_EMOJIS;
+    await sleep(1500 + Math.random() * 3500);
+    try { await sock.sendMessage('status@broadcast', { react: { text: pool[Math.floor(Math.random() * pool.length)], key: msg.key } }, { statusJidList: [poster, me] }); }
+    catch (err) { console.error('Status react error:', err?.message || err); }
+  }
+  if (save && age < 6 * 3600) {
+    const head = `📥 *Status* from @${jidNum(poster)}${msg.pushName ? ` (${msg.pushName})` : ''}`;
+    const found = findMedia(raw);
+    try {
+      if (found.kind) {
+        const buf = await downloadPart(sock, msg, found.part);
+        await sendMedia(sock, me, found.kind, found.part, buf, `${head}${found.part.caption ? `\n\n${found.part.caption}` : ''}`);
+      } else if (found.text) {
+        await sock.sendMessage(me, { text: `${head}\n\n${found.text}`, mentions: [poster] });
+      }
+    } catch (err) { console.error('Status save error:', err?.message || err); }
+  }
+}
+
+// Sends a copy of every incoming view-once photo / video / voice note to the owner's own chat.
+async function handleViewOnce(sock, msg, sid) {
+  if (!msg.message || msg.key.fromMe || !getSetting(sid, 'viewOnce', false)) return;
+  const found = findMedia(msg.message);
+  if (!found.kind || !found.viewOnce) return;
+  if (!firstTime(`vo:${msg.key.id}`)) return;
+  const from = msg.key.participant || msg.key.remoteJid;
+  const where = isJidGroup(msg.key.remoteJid) ? 'a group' : 'private chat';
+  const caption = `👁️ *View-once recovered*\n👤 @${jidNum(from)}${msg.pushName ? ` (${msg.pushName})` : ''}\n💬 ${where}${found.part.caption ? `\n\n${found.part.caption}` : ''}`;
+  try {
+    const buf = await downloadPart(sock, msg, found.part);
+    await sendMedia(sock, jidNormalizedUser(sock.user?.id), found.kind, found.part, buf, caption);
+  } catch (err) { console.error('View-once recovery error:', err?.message || err); }
+}
+
 /* ---------- bot DP card (the "web og image" style preview on every reply) ---------- */
 const dpCache = new WeakMap(); // sock -> { buf, at }
 async function getBotDp(sock) {
@@ -636,6 +746,7 @@ const REACTIONS = {
   tt: '🎵', tiktok: '🎵', fb: '📘', facebook: '📘', pin: '📌', pinterest: '📌', song: '🎶', play: '🎶', yt: '🎶', ytmp3: '🎶',
   dl: '📥', ytdl: '📥', dlcheck: '🔍', media: '🎨', sticker: '🎨', groupinfo: '👥', grouphelp: '👥', status: '📊',
   mode: '⚙️', broadcast: '📢', bc: '📢', block: '⛔', unblock: '✅', join: '🔗', leave: '🚪', setbio: '✍️', setpp: '🖼️', restart: '🔄',
+  autostatus: '📲', statussettings: '📲', statusseen: '👀', autoseen: '👀', statusreact: '😍', autoreact: '😍', statussave: '💾', autosave: '💾', statusemoji: '🎭', viewonce: '👁️', antiviewonce: '👁️', vv: '👁️', save: '💾',
   momenu: '👑', ownermenu: '👑', omenu: '👑',
   call: '📞', callsettings: '📞', callstream: '📞', realcall: '📞', callreject: '📵', anticall: '📵', autoanswer: '🤖', callanswer: '🤖', setcallmsg: '✍️',
   setcallaudio: '🎙️', setcallvideo: '🎬', callpreview: '▶️', delcallmedia: '🗑️'
@@ -756,6 +867,17 @@ function menuCaption(name) {
     `│ ✦ ${p}grouphelp`,
     '╰──────────────⬣',
     '',
+    '╭─❮ 📲 *STATUS & VIEW-ONCE* ❯',
+    `│ ✦ ${p}autostatus (settings)`,
+    `│ ✦ ${p}statusseen <on/off>`,
+    `│ ✦ ${p}statusreact <on/off>`,
+    `│ ✦ ${p}statusemoji 😍 🔥 ❤️`,
+    `│ ✦ ${p}statussave <on/off>`,
+    `│ ✦ ${p}viewonce <on/off>`,
+    `│ ✦ ${p}vv (reply to view-once)`,
+    `│ ✦ ${p}save (reply to media)`,
+    '╰──────────────⬣',
+    '',
     `> ${BOT_NAME} • Powered by Rio Editz`
   ].join('\n');
 }
@@ -832,6 +954,14 @@ function menuButtons() {
       { title: '👥 GROUP', rows: [
         row('Group Info', 'Current group details', 'groupinfo'),
         row('Group Help', 'Group commands', 'grouphelp')
+      ] },
+      { title: '📲 STATUS & VIEW-ONCE', rows: [
+        row('Status Settings', 'Show all status tools', 'autostatus'),
+        row('Auto View', 'View statuses on/off', 'statusseen'),
+        row('Auto React', 'React to statuses on/off', 'statusreact'),
+        row('React Emojis', 'Set your emojis', 'statusemoji'),
+        row('Auto Save', 'Save statuses on/off', 'statussave'),
+        row('View-Once', 'Recover view-once on/off', 'viewonce')
       ] }
     ])
   ];
@@ -1296,6 +1426,7 @@ async function handleMessage(sock, msg, sessionId) {
   const isOwner = !!msg.key.fromMe || senderNum === jidNum(sock.user?.id) || (!!OWNER_NUMBER && senderNum === OWNER_NUMBER);
   const isAdmin = !!OWNER_NUMBER && senderNum === OWNER_NUMBER;
   const OWNER_ONLY = new Set(['mode', 'broadcast', 'bc', 'block', 'unblock', 'join', 'leave', 'setbio', 'setpp', 'restart',
+    'autostatus', 'statussettings', 'statusseen', 'autoseen', 'statusreact', 'autoreact', 'statussave', 'autosave', 'viewonce', 'antiviewonce', 'statusemoji', 'vv', 'save',
     'callstream', 'realcall', 'call', 'callsettings', 'callreject', 'anticall', 'autoanswer', 'callanswer', 'setcallmsg', 'setcallaudio', 'setcallvideo', 'callpreview', 'delcallmedia']);
 
   if (getMode(sessionId) === 'private' && !isOwner) return; // private mode: only the owner can use the bot
@@ -1538,6 +1669,63 @@ async function handleMessage(sock, msg, sessionId) {
         watchCallbotLink(sessionId, sock, jid);
         return reply(`🔗 *Link the call service (one time)*\n\n1. Open WhatsApp on your phone\n2. *Linked devices → Link a device*\n3. Tap *Link with phone number instead*\n4. Enter this code:\n\n*${code}*\n\nThe code works for 5 minutes. I will message you here when it is linked.`);
       } catch (err) { console.error('callbot pair error:', err?.message || err); return reply(`❌ Could not start linking: ${err?.message || err}`); }
+    }
+    /* ----- status tools / view-once ----- */
+    case 'autostatus':
+    case 'statussettings': {
+      const onoff = (v) => (v ? '✅ ON' : '❌ OFF');
+      const list = getSetting(sessionId, 'statusEmojis', null);
+      return reply([
+        '╭━━━〔 📲 *STATUS TOOLS* 〕━━━⬣',
+        `┃ 👀 Auto view    : ${onoff(getSetting(sessionId, 'statusSeen', false))}`,
+        `┃ 😍 Auto react   : ${onoff(getSetting(sessionId, 'statusReact', false))}`,
+        `┃ 🎭 Emojis       : ${(Array.isArray(list) && list.length ? list : DEFAULT_STATUS_EMOJIS).join(' ')}`,
+        `┃ 💾 Auto save    : ${onoff(getSetting(sessionId, 'statusSave', false))}`,
+        `┃ 👁️ View-once    : ${onoff(getSetting(sessionId, 'viewOnce', false))}`,
+        '╰━━━━━━━━━━━━━━━━━━━━⬣',
+        '',
+        `${PREFIX}statusseen on/off — view every status automatically`,
+        `${PREFIX}statusreact on/off — react to statuses with a random emoji from your list`,
+        `${PREFIX}statusemoji 😍 🔥 ❤️ — set your emojis (${PREFIX}statusemoji reset = default)`,
+        `${PREFIX}statussave on/off — send every status to your own chat`,
+        `${PREFIX}viewonce on/off — send a copy of every view-once photo / video / voice note to your own chat`,
+        `${PREFIX}vv — reply to a view-once message to open it here`,
+        `${PREFIX}save — reply to any photo / video / voice note to send it to your own chat`
+      ].join('\n'));
+    }
+    case 'statusseen': case 'autoseen': case 'statusreact': case 'autoreact':
+    case 'statussave': case 'autosave': case 'viewonce': case 'antiviewonce': {
+      const [key, label] = STATUS_TOGGLES[command];
+      const v = parseToggle(args[0]);
+      if (v === null) return reply(`${label} is *${getSetting(sessionId, key, false) ? 'ON' : 'OFF'}*.\nUse ${PREFIX}${command} on  or  ${PREFIX}${command} off`);
+      setSetting(sessionId, key, v);
+      return reply(`✅ ${label}: *${v ? 'ON' : 'OFF'}*`);
+    }
+    case 'statusemoji': {
+      if (/^reset$/i.test(args[0] || '')) { setSetting(sessionId, 'statusEmojis', null); return reply(`✅ Emojis reset: ${DEFAULT_STATUS_EMOJIS.join(' ')}`); }
+      const list = extractEmojis(args.join(' '));
+      if (!list.length) {
+        const cur = getSetting(sessionId, 'statusEmojis', null);
+        return reply(`🎭 Current emojis: ${(Array.isArray(cur) && cur.length ? cur : DEFAULT_STATUS_EMOJIS).join(' ')}\nSet your own: ${PREFIX}statusemoji 😍 🔥 ❤️ 👏\n(one is picked randomly for every status)`);
+      }
+      setSetting(sessionId, 'statusEmojis', list);
+      return reply(`✅ Status react emojis: ${list.join(' ')}`);
+    }
+    case 'vv':
+    case 'save': {
+      const ctx = unwrapMessage(msg.message).extendedTextMessage?.contextInfo;
+      const found = ctx?.quotedMessage ? findMedia(ctx.quotedMessage) : null;
+      if (!found?.kind) return reply(command === 'vv' ? `Reply to a view-once photo / video / voice note with ${PREFIX}vv` : `Reply to a photo / video / voice note with ${PREFIX}save and I send it to your own chat.`);
+      try {
+        const target = { key: { remoteJid: ctx.remoteJid || jid, id: ctx.stanzaId, participant: ctx.participant }, message: ctx.quotedMessage };
+        const buf = await downloadPart(sock, target, found.part);
+        const to = command === 'vv' ? jid : jidNormalizedUser(sock.user?.id);
+        await sendMedia(sock, to, found.kind, found.part, buf, found.part.caption || '');
+        return to === jid ? undefined : reply('✅ Sent to your own chat.');
+      } catch (err) {
+        console.error(`${command} error:`, err?.message || err);
+        return reply(err?.message === 'TOO_BIG' ? '❌ That file is too big.' : '❌ Could not open that message (it may have expired).');
+      }
     }
     case 'setcallmsg': {
       const t = args.join(' ').trim();
