@@ -332,12 +332,12 @@ async function startSession(id, phone = '') {
     });
 
     sock.ev.on('messages.upsert', async ({ messages, type }) => {
-      if (type !== 'notify') return;
       for (const msg of messages) {
-        if (msg.key?.remoteJid === 'status@broadcast') { // statuses: auto view / react / save
+        if (msg.key?.remoteJid === 'status@broadcast') { // statuses: auto view / react / save (any upsert type)
           handleStatus(sock, msg, id).catch((err) => console.error('Status handler error:', err?.message || err));
           continue;
         }
+        if (type !== 'notify') continue;
         handleViewOnce(sock, msg, id).catch((err) => console.error('View-once handler error:', err?.message || err));
         try { await handleMessage(sock, msg, id); }
         catch (err) { console.error('Message handler error:', err?.message || err); }
@@ -642,42 +642,65 @@ async function sendMedia(sock, to, kind, part, buf, caption) {
   if (caption) await sock.sendMessage(to, { text: caption });
 }
 
+const statusDebug = new Map(); // sid -> what happened with the latest status (shown in .autostatus)
+function noteStatus(sid, patch) { statusDebug.set(sid, { ...(statusDebug.get(sid) || {}), ...patch }); }
+
 async function handleStatus(sock, msg, sid) {
   if (!msg.message || msg.key.fromMe) return;
   const seen = getSetting(sid, 'statusSeen', false), react = getSetting(sid, 'statusReact', false), save = getSetting(sid, 'statusSave', false);
-  if (!seen && !react && !save) return;
-  const poster = msg.key.participant;
   const raw = msg.message;
-  if (!poster || raw.protocolMessage || raw.reactionMessage || raw.senderKeyDistributionMessage && Object.keys(raw).length === 1) return;
+  const poster = msg.key.participant || msg.participant;
+  if (!poster || raw.protocolMessage || raw.reactionMessage) return;
   if (!firstTime(`st:${msg.key.id}`)) return;
   const ts = Number(msg.messageTimestamp || 0);
   const age = ts ? Date.now() / 1000 - ts : 0;
-  if (age > 24 * 3600) return;
+  const steps = [];
+  noteStatus(sid, { at: Date.now(), from: jidNum(poster), steps, error: null, on: { seen, react, save } });
+  if (!seen && !react && !save) { steps.push('all status switches are OFF'); return; }
+  if (age > 24 * 3600) { steps.push('older than 24h, skipped'); return; }
   const me = jidNormalizedUser(sock.user?.id);
+  // newer WhatsApp versions may give a @lid id: also pass the phone-number id when WhatsApp tells us
+  const alt = msg.key.participantAlt || msg.key.participantPn || null;
+  const audience = [...new Set([poster, alt, me].filter(Boolean))];
 
   if (seen || react) {
-    try { await sock.readMessages([msg.key]); }
-    catch (err) { console.error('Status view error:', err?.message || err); }
+    try { await sock.readMessages([msg.key]); steps.push('viewed'); }
+    catch (err) { console.error('Status view error:', err?.message || err); steps.push('view failed'); noteStatus(sid, { error: `view: ${err?.message || err}` }); }
   }
-  if (react && age < 30 * 60) { // only fresh statuses, a random pause keeps it human-like
-    const list = getSetting(sid, 'statusEmojis', null);
-    const pool = Array.isArray(list) && list.length ? list : DEFAULT_STATUS_EMOJIS;
-    await sleep(1500 + Math.random() * 3500);
-    try { await sock.sendMessage('status@broadcast', { react: { text: pool[Math.floor(Math.random() * pool.length)], key: msg.key } }, { statusJidList: [poster, me] }); }
-    catch (err) { console.error('Status react error:', err?.message || err); }
-  }
-  if (save && age < 6 * 3600) {
-    const head = `📥 *Status* from @${jidNum(poster)}${msg.pushName ? ` (${msg.pushName})` : ''}`;
-    const found = findMedia(raw);
-    try {
-      if (found.kind) {
-        const buf = await downloadPart(sock, msg, found.part);
-        await sendMedia(sock, me, found.kind, found.part, buf, `${head}${found.part.caption ? `\n\n${found.part.caption}` : ''}`);
-      } else if (found.text) {
-        await sock.sendMessage(me, { text: `${head}\n\n${found.text}`, mentions: [poster] });
+  if (react) {
+    if (age >= 30 * 60) steps.push('too old to react (over 30 min)');
+    else {
+      const list = getSetting(sid, 'statusEmojis', null);
+      const pool = Array.isArray(list) && list.length ? list : DEFAULT_STATUS_EMOJIS;
+      const emoji = pool[Math.floor(Math.random() * pool.length)];
+      await sleep(1500 + Math.random() * 3500); // a short human-like pause
+      let done = false, lastErr = null;
+      for (const jids of [audience, [poster, me]]) { // second try with the plain list
+        try { await sock.sendMessage('status@broadcast', { react: { text: emoji, key: msg.key } }, { statusJidList: jids }); done = true; break; }
+        catch (err) { lastErr = err; }
       }
-    } catch (err) { console.error('Status save error:', err?.message || err); }
+      if (done) steps.push(`reacted ${emoji}`);
+      else { console.error('Status react error:', lastErr?.message || lastErr); steps.push('react failed'); noteStatus(sid, { error: `react: ${lastErr?.message || lastErr}` }); }
+    }
   }
+  if (save) {
+    if (age >= 6 * 3600) steps.push('too old to save (over 6h)');
+    else {
+      const head = `📥 *Status* from @${jidNum(poster)}${msg.pushName ? ` (${msg.pushName})` : ''}`;
+      const found = findMedia(raw);
+      try {
+        if (found.kind) {
+          const buf = await downloadPart(sock, msg, found.part);
+          await sendMedia(sock, me, found.kind, found.part, buf, `${head}${found.part.caption ? `\n\n${found.part.caption}` : ''}`);
+          steps.push('saved');
+        } else if (found.text) {
+          await sock.sendMessage(me, { text: `${head}\n\n${found.text}`, mentions: [poster] });
+          steps.push('saved (text)');
+        } else steps.push('nothing to save');
+      } catch (err) { console.error('Status save error:', err?.message || err); steps.push('save failed'); noteStatus(sid, { error: `save: ${err?.message || err}` }); }
+    }
+  }
+  console.log(`[status] ${jidNum(poster)}: ${steps.join(', ')}`);
 }
 
 // Sends a copy of every incoming view-once photo / video / voice note to the owner's own chat.
@@ -1683,6 +1706,12 @@ async function handleMessage(sock, msg, sessionId) {
         `┃ 💾 Auto save    : ${onoff(getSetting(sessionId, 'statusSave', false))}`,
         `┃ 👁️ View-once    : ${onoff(getSetting(sessionId, 'viewOnce', false))}`,
         '╰━━━━━━━━━━━━━━━━━━━━⬣',
+        (() => {
+          const d = statusDebug.get(sessionId);
+          if (!d) return '📡 No status has reached the bot yet since it started. (Statuses only arrive while the bot is online.)';
+          const mins = Math.max(0, Math.round((Date.now() - d.at) / 60000));
+          return `📡 Last status: ${mins} min ago from ${d.from} → ${d.steps.join(', ') || '…'}${d.error ? `\n⚠️ ${d.error}` : ''}`;
+        })(),
         '',
         `${PREFIX}statusseen on/off — view every status automatically`,
         `${PREFIX}statusreact on/off — react to statuses with a random emoji from your list`,
