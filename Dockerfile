@@ -4,7 +4,8 @@ FROM golang:1.24-bookworm AS callbot
 ENV GOTOOLCHAIN=auto CGO_ENABLED=0 GOFLAGS=-mod=mod
 WORKDIR /src
 COPY callbot/ ./
-RUN go mod tidy && go build -trimpath -ldflags="-s -w" -o /out/callbot .
+# Try the build with outgoing calls (-tags dial); if meowcaller has no matching function, fall back to the normal build.
+RUN go mod tidy && (go build -tags dial -trimpath -ldflags="-s -w" -o /out/callbot . || go build -trimpath -ldflags="-s -w" -o /out/callbot .)
 
 # Stage 2: the bot itself.
 FROM node:20-bookworm-slim
