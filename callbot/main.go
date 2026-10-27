@@ -609,6 +609,8 @@ func (m *manager) routes(secret string) http.Handler {
 		}
 	})
 
+	m.packRoutes(mux)
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		given := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if subtle.ConstantTimeCompare([]byte(given), []byte(secret)) != 1 {
