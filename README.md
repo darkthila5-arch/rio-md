@@ -124,3 +124,10 @@ Paired sessions are restored automatically (from MongoDB or `SESSION_DIR`). Unpa
 - Session folders and the MongoDB `auth` collection hold WhatsApp auth keys: never share or publish them.
 - The call service listens on `127.0.0.1` only and needs a secret that is generated on every start.
 - Automated use of an account can get it restricted by WhatsApp. Use only with the account owner's consent.
+
+## Call packs and outgoing calls (owner)
+A pack is a named audio + video set. The bot can call a number and stream a pack into the call once they pick up.
+- `.addpack <name>` (reply to an audio, then again to a video), `.packs`, `.delpack <name>`
+- `.callto <number with country code> <pack> [voice|video]` e.g. `.callto 94771234567 pack1`
+- Needs the call service linked once (`.callstream on`). One call per minute, hangs up if nobody answers in 45 s. Only call people who agree to it.
+- Outgoing calls are compiled with `go build -tags dial`. `callbot/dial.go` contains the single meowcaller call (`StartCall`) that must match your meowcaller version; the Dockerfile falls back to a build without it if that does not compile (`.callto` then reports "not compiled in").
