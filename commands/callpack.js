@@ -16,6 +16,39 @@ const line = (name, info) => `• *${name}*  🎙️ ${info.audio ? '✅' : '—
 
 export default [
   {
+    name: 'ohelp', aliases: ['callhelp', 'packhelp'], owner: true,
+    async run({ reply }) {
+      return reply([
+        '╭━━━〔 📞 *CALL PACK HELP* 〕━━━⬣',
+        '┃ Call a number and play your audio / video in the call.',
+        '╰━━━━━━━━━━━━━━━━━━━━⬣',
+        '',
+        '*1️⃣ One-time setup*',
+        `${PREFIX}callstream on — link the call service (copy the code → WhatsApp → Linked devices → Link with phone number)`,
+        '',
+        '*2️⃣ Make a pack* (name: a-z, 0-9, _ or -)',
+        `Reply to a video  → ${PREFIX}addpack <name>`,
+        `Reply to an audio → ${PREFIX}addpack <name>  (same name, adds the audio)`,
+        `${PREFIX}packs — see your packs (🎙️ audio / 🎬 video)`,
+        `${PREFIX}delpack <name> — remove a pack`,
+        '',
+        '*3️⃣ Call someone*',
+        `${PREFIX}callto <number> <pack> [voice|video]`,
+        `Example: ${PREFIX}callto 94771234567 pack1 video`,
+        '• Number with country code, digits only',
+        '• No "voice/video" → video if the pack has a video, else voice',
+        '• Plays when they pick up, hangs up when it ends',
+        '• Hangs up by itself if nobody answers in 45 s',
+        '• One call per minute',
+        '',
+        '*Other call tools*',
+        `${PREFIX}call — settings · ${PREFIX}callstream loop on/off · ${PREFIX}callstream status`,
+        '',
+        '_Only call people who agree to it._'
+      ].join('\n'));
+    },
+  },
+  {
     name: 'addpack', aliases: ['setpack'], owner: true,
     async run({ sock, msg, jid, sessionId, args, reply }) {
       const name = (args[0] || '').toLowerCase();
