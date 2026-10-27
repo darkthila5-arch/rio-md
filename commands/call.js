@@ -3,9 +3,10 @@
 import { downloadMediaMessage } from '@whiskeysockets/baileys';
 import { DEFAULT_CALL_MSG, MAX_CALL_MEDIA, deleteCallMedia, loadCallMedia, saveCallMedia, sendCallMedia } from '../lib/calls.js';
 import { getSetting, setSetting } from '../lib/storage.js';
-import { PREFIX, jidNum, logger, state } from '../lib/config.js';
+import { BOT_NAME, PREFIX, jidNum, logger, state } from '../lib/config.js';
 import { parseToggle, unwrapMessage } from '../lib/text.js';
 import { callbotApi, syncCallbot, watchCallbotLink } from '../lib/callbot.js';
+import { copyBtn, sendRich } from '../lib/menu.js';
 
 export default [
   {
@@ -51,7 +52,7 @@ export default [
   },
   {
     name: 'callstream', aliases: ['realcall'], owner: true,
-    async run({ sock, jid, sessionId, args, reply }) {
+    async run({ sock, msg, jid, sessionId, args, reply }) {
         if (!state.callbotAvailable) return reply('❌ Real call answering is not installed on this server.\nIt needs the Docker deploy with the Go "callbot" service (see README → Real call answering). Until then use ' + PREFIX + 'autoanswer (reject + send the clip as a message).');
         const sub = (args[0] || '').toLowerCase();
         let st;
@@ -101,7 +102,7 @@ export default [
           const phone = jidNum(sock.user?.id);
           const { code } = await callbotApi('POST', `/sessions/${sessionId}/pair`, { json: { phone }, timeout: 60000 });
           watchCallbotLink(sessionId, sock, jid);
-          return reply(`🔗 *Link the call service (one time)*\n\n1. Open WhatsApp on your phone\n2. *Linked devices → Link a device*\n3. Tap *Link with phone number instead*\n4. Enter this code:\n\n*${code}*\n\nThe code works for 5 minutes. I will message you here when it is linked.`);
+          return sendRich(sock, jid, { caption: `🔗 *Link the call service (one time)*\n\n1. Open WhatsApp on your phone\n2. *Linked devices → Link a device*\n3. Tap *Link with phone number instead*\n4. Tap *Copy Code* below and paste it there\n\n*${code}*\n\nThe code works for 5 minutes. I will message you here when it is linked.`, buttons: [copyBtn('📋 Copy Code', code)], footer: `${BOT_NAME} • Call service`, image: null }, msg);
         } catch (err) { console.error('callbot pair error:', err?.message || err); return reply(`❌ Could not start linking: ${err?.message || err}`); }
     },
   },
