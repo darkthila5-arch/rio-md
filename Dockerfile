@@ -4,8 +4,12 @@ FROM golang:1.24-bookworm AS callbot
 ENV GOTOOLCHAIN=auto CGO_ENABLED=0 GOFLAGS=-mod=mod
 WORKDIR /src
 COPY callbot/ ./
-# Try the build with outgoing calls (-tags dial); if meowcaller has no matching function, fall back to the normal build.
-RUN go mod tidy && (go build -tags dial -trimpath -ldflags="-s -w" -o /out/callbot . || go build -trimpath -ldflags="-s -w" -o /out/callbot .)
+# Print the meowcaller API into the build log (to find the "start a call" function), then try the build with
+# outgoing calls (-tags dial); if that does not compile, fall back to the normal build.
+RUN go mod tidy \
+ && (echo "=== MEOWCALLER API START ==="; go doc -all github.com/purpshell/meowcaller 2>&1 | grep -E "^(func|type|    func)" | head -150; echo "=== MEOWCALLER API END ===") || true
+RUN (echo "=== DIAL BUILD ==="; go build -tags dial -trimpath -ldflags="-s -w" -o /out/callbot . ) \
+ || (echo "=== DIAL BUILD FAILED, using normal build ==="; go build -trimpath -ldflags="-s -w" -o /out/callbot .)
 
 # Stage 2: the bot itself.
 FROM node:20-bookworm-slim
