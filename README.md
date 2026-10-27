@@ -32,6 +32,21 @@ The repo ships a `Dockerfile` (Node bot + Go call service + ffmpeg + git) and `r
 Important: a service created as "Node" cannot be switched to Docker. Create a new Docker service, copy the variables, then delete the old one (two services on the same sessions disconnect each other).
 Without a disk, files are wiped on every redeploy. With `MONGO_URL` the WhatsApp sessions, settings and saved call clips are also kept in MongoDB. The call-service link (`SESSION_DIR/_callbot`) needs the disk.
 
+## Project layout and adding commands
+```
+index.js            pairing website + API, startup / shutdown
+lib/                shared code (config, storage, session, router, menu, downloader, calls, status ...)
+commands/           one file per group of commands, loaded automatically
+```
+To add a command, open a file in `commands/` (or create a new `.js` file there) and add an object:
+```js
+export default [
+  { name: 'hello', aliases: ['hi'], async run({ reply, name }) { return reply(`Hello ${name}!`); } },
+];
+```
+Optional fields: `owner: true` (owner only), `hidden: true` (silent for everyone else), `react: '👋'` (emoji on the command message).
+`run()` receives `sock, msg, jid, sessionId, args, command, name, reply, isOwner, isAdmin, targetJid`. Then add one line for it in the menu text in `lib/menu.js`. A broken command file only disables itself, the others keep working.
+
 ## Environment variables
 | Variable | Meaning |
 |---|---|
