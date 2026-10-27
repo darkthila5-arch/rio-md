@@ -19,6 +19,24 @@ export default [
     },
   },
   {
+    name: 'ig', aliases: ['instagram', 'insta'],
+    async run({ sock, msg, jid, args }) {
+        return startDownload(sock, jid, msg, 'instagram', args[0]);
+    },
+  },
+  {
+    name: 'tw', aliases: ['twitter', 'x'],
+    async run({ sock, msg, jid, args }) {
+        return startDownload(sock, jid, msg, 'twitter', args[0]);
+    },
+  },
+  {
+    name: 'video', aliases: ['ytv', 'ytvideo'],
+    async run({ sock, msg, jid, args }) {
+        return startSong(sock, jid, msg, args.join(' ').trim());
+    },
+  },
+  {
     name: 'pin', aliases: ['pinterest'],
     async run({ sock, msg, jid, args }) {
         return startDownload(sock, jid, msg, 'pinterest', args[0]);
