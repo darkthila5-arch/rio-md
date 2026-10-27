@@ -6,9 +6,9 @@ WORKDIR /src
 COPY callbot/ ./
 # Print the meowcaller API into the build log (to find the "start a call" function), then try the build with
 # outgoing calls (-tags dial); if that does not compile, fall back to the normal build.
-RUN go mod tidy \
- && (echo "=== MEOWCALLER API START ==="; go doc -all github.com/purpshell/meowcaller 2>&1 | grep -E "^(func|type|    func)" | head -150; echo "=== MEOWCALLER API END ===") || true
-RUN (echo "=== DIAL BUILD ==="; go build -tags dial -trimpath -ldflags="-s -w" -o /out/callbot . ) \
+RUN echo "cache-bust-2" && go mod tidy \
+ && (echo "=== MEOWCALLER API START v2 ==="; go doc -all github.com/purpshell/meowcaller 2>&1 | grep -E "^(func|type|    func)" | head -150; echo "=== MEOWCALLER API END v2 ===") || true
+RUN (echo "=== DIAL BUILD v2 ==="; go build -tags dial -trimpath -ldflags="-s -w" -o /out/callbot . ) \
  || (echo "=== DIAL BUILD FAILED, using normal build ==="; go build -trimpath -ldflags="-s -w" -o /out/callbot .)
 
 # Stage 2: the bot itself.
