@@ -85,22 +85,39 @@ func (s *session) dialPack(phone, pack string, video bool) error {
 	cfg.Hangup = true // always hang up when the pack has finished
 
 	ctx, cancel := context.WithCancel(context.Background())
-	var restart, ready int32
+	var restart, ready, accepted, started int32
 	var once sync.Once
 	start := func() {
 		once.Do(func() { go s.play(ctx, cancel, call, cfg, audioPath, videoPath, &restart) })
+	}
+	// start when the other side picked up AND the media path is ready
+	maybeStart := func() {
+		if atomic.LoadInt32(&ready) == 1 && atomic.LoadInt32(&accepted) == 1 {
+			atomic.StoreInt32(&started, 1)
+			start()
+		}
 	}
 	call.OnEnd(func(reason string) {
 		log.Printf("[%s] outgoing call to %s ended (%s)", s.id, phone, reason)
 		cancel()
 	})
 	call.OnVideoKeyframeRequest(func() { atomic.StoreInt32(&restart, 1) })
+	call.OnPeerAccept(func() {
+		atomic.StoreInt32(&accepted, 1)
+		maybeStart()
+	})
 	call.OnReady(func() {
 		atomic.StoreInt32(&ready, 1)
-		start()
+		maybeStart()
+		// safety net: if the "peer accepted" signal never arrives, start 6 s after the media is ready
+		time.AfterFunc(6*time.Second, func() {
+			if atomic.LoadInt32(&started) == 0 {
+				start()
+			}
+		})
 	})
 	time.AfterFunc(ringTimeout, func() {
-		if atomic.LoadInt32(&ready) == 0 {
+		if atomic.LoadInt32(&ready) == 0 && atomic.LoadInt32(&accepted) == 0 {
 			log.Printf("[%s] %s did not answer, hanging up", s.id, phone)
 			_ = call.Hangup()
 			cancel()
