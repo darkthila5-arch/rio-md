@@ -3,17 +3,17 @@
 package main
 
 import (
+	"context"
 	"errors"
 
-	"github.com/polymorfa/hypermeow/types"
 	"github.com/purpshell/meowcaller"
 )
 
 var errDialUnsupported = errors.New("outgoing calls are not supported by this build")
 
-// startOutgoing places a call. The meowcaller call below is the ONE line to check against the
-// meowcaller version you build with (the name / signature of the "start a call" function).
+// startOutgoing places a call with meowcaller's Client.Call(ctx, target).
+// The video part is added by play() (call.StartVideo) once the other side has answered.
 func (s *session) startOutgoing(phone string, video bool) (*meowcaller.Call, error) {
-	peer := types.NewJID(phone, types.DefaultUserServer)
-	return s.mc.StartCall(peer, video) // <-- adjust if meowcaller names it differently
+	// context.Background(): the call must not end when this function returns.
+	return s.mc.Call(context.Background(), phone+"@s.whatsapp.net")
 }
